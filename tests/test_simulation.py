@@ -1,0 +1,59 @@
+from watchtower.auth import AuthConfig
+from watchtower.models import AgentMetrics, AgentTelemetry, TaskStatus
+from watchtower.simulation import SimulationState
+
+
+def test_submitted_task_is_assigned_and_completed() -> None:
+    simulation = SimulationState()
+    task = simulation.submit_task("Summarize the latest benchmark run")
+
+    for _ in range(90):
+        simulation.update(0.2)
+
+    assert task.assigned_agent_id is not None
+    assert task.status is TaskStatus.COMPLETE
+    assert task.progress == 1.0
+
+
+def test_task_can_target_specific_agent() -> None:
+    simulation = SimulationState()
+    task = simulation.submit_task("Write code", requested_agent_id="mistral")
+
+    simulation.update(0.1)
+
+    assert task.assigned_agent_id == "mistral"
+    assert simulation.agents["mistral"].current_task_id == task.id
+
+
+def test_targeted_task_waits_for_busy_agent() -> None:
+    simulation = SimulationState()
+    first = simulation.submit_task("First", requested_agent_id="gpt")
+    second = simulation.submit_task("Second", requested_agent_id="gpt")
+
+    simulation.update(0.1)
+
+    assert first.assigned_agent_id == "gpt"
+    assert second.status is TaskStatus.SUBMITTED
+
+
+def test_remote_telemetry_updates_agent_metrics() -> None:
+    simulation = SimulationState()
+    profile = simulation.profiles[0]
+
+    simulation.update(
+        0.1,
+        {
+            profile.id: AgentTelemetry(
+                agent_id=profile.id,
+                metrics=AgentMetrics(load=0.9, latency_ms=123, tokens_per_minute=456),
+            )
+        },
+    )
+
+    assert simulation.agents[profile.id].metrics.load == 0.9
+    assert simulation.agents[profile.id].metrics.latency_ms == 123
+
+
+def test_auth_headers_support_oauth_and_login() -> None:
+    assert AuthConfig(oauth_token="secret").headers()["Authorization"] == "Bearer secret"
+    assert AuthConfig(username="u", password="p").headers()["Authorization"].startswith("Basic ")
