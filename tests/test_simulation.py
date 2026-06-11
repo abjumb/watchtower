@@ -36,6 +36,21 @@ def test_targeted_task_waits_for_busy_agent() -> None:
     assert second.status is TaskStatus.SUBMITTED
 
 
+def test_auto_routing_waits_when_all_agents_are_busy() -> None:
+    simulation = SimulationState()
+    tasks = [simulation.submit_task(f"Task {index}") for index in range(len(simulation.agents) + 1)]
+
+    simulation.update(0.1)
+
+    assigned_tasks = [task for task in tasks if task.assigned_agent_id is not None]
+    waiting_tasks = [task for task in tasks if task.status is TaskStatus.SUBMITTED]
+    current_task_ids = {agent.current_task_id for agent in simulation.agents.values()}
+
+    assert len(assigned_tasks) == len(simulation.agents)
+    assert len(waiting_tasks) == 1
+    assert {task.id for task in assigned_tasks} == current_task_ids
+
+
 def test_remote_telemetry_updates_agent_metrics() -> None:
     simulation = SimulationState()
     profile = simulation.profiles[0]

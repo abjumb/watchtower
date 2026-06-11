@@ -130,9 +130,10 @@ class SimulationState:
             if not agent or agent.current_task_id is not None:
                 return []
             return [agent]
+        available_agents = [agent for agent in self.agents.values() if agent.current_task_id is None]
         return sorted(
-            self.agents.values(),
-            key=lambda agent: (agent.current_task_id is not None, agent.metrics.load, agent.profile.id),
+            available_agents,
+            key=lambda agent: (agent.metrics.load, agent.profile.id),
         )
 
     def _advance_agent(self, index: int, agent: AgentState, dt: float) -> None:

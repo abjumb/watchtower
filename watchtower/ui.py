@@ -64,7 +64,7 @@ class WatchtowerApp:
                     self._submit_input()
                 elif event.key == pygame.K_BACKSPACE:
                     self.input_text = self.input_text[:-1]
-                elif pygame.K_1 <= event.key <= pygame.K_5:
+                elif self._is_agent_shortcut(event):
                     self._select_agent_by_index(event.key - pygame.K_1)
                 elif event.unicode and len(self.input_text) < 180:
                     self.input_text += event.unicode
@@ -193,7 +193,7 @@ class WatchtowerApp:
         y += 36
         self._text("Tasks", PANEL_X + 18, y, self.title_font, TEXT)
         y += 38
-        for task in tasks[:4]:
+        for task in tasks[:3]:
             color = ACCENT if task.status is not TaskStatus.COMPLETE else (77, 201, 129)
             pygame.draw.rect(self.screen, SURFACE_2, (PANEL_X + 18, y, 224, 50), border_radius=6)
             pygame.draw.rect(self.screen, color, (PANEL_X + 18, y, 4, 50), border_radius=2)
@@ -248,6 +248,10 @@ class WatchtowerApp:
         if 0 <= index < len(agents):
             self.selected_agent_id = agents[index].profile.id
             self.flash_message = f"Selected {agents[index].profile.display_name}"
+
+    def _is_agent_shortcut(self, event: pygame.event.Event) -> bool:
+        modifier = event.mod & (pygame.KMOD_CTRL | pygame.KMOD_ALT | pygame.KMOD_META)
+        return bool(modifier and pygame.K_1 <= event.key <= pygame.K_5)
 
     def _agent_label(self, agent_id: str | None) -> str:
         if not agent_id:

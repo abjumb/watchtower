@@ -15,7 +15,7 @@ python -m venv .venv
 ## Controls
 
 - Type a task and press Enter or click Submit.
-- Click a model in the side panel, or press 1-5, to route new tasks to that model.
+- Click a model in the side panel, or press Ctrl/Alt/Meta + 1-5, to route new tasks to that model.
 - Prefix a task with an agent id for one-off targeting, for example `@gpt summarize these logs`.
 - `/auto` returns to load-based routing.
 - `/endpoint https://your-observability-service.example`
