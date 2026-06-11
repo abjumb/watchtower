@@ -18,6 +18,7 @@ from watchtower.models import (
     SubmittedTask,
     TaskPriority,
     TaskStatus,
+    utcnow,
 )
 
 
@@ -27,11 +28,11 @@ WORLD_HEIGHT = 620
 
 def default_profiles() -> list[AgentProfile]:
     return [
-        AgentProfile("gpt", "GPT", "OpenAI GPT", "reasoning", "#44b37f", "GPT"),
-        AgentProfile("claude", "Claude", "Anthropic Claude", "analysis", "#d97842", "CLD"),
-        AgentProfile("gemini", "Gemini", "Google Gemini", "research", "#4d8df7", "GEM"),
-        AgentProfile("llama", "Llama", "Meta Llama", "local", "#9b72f2", "LMA"),
-        AgentProfile("mistral", "Mistral", "Mistral Large", "coding", "#e0b84f", "MST"),
+        AgentProfile("gpt", "GPT", "OpenAI GPT", "reasoning", "#44b37f", "GPT", "openai", "gpt-5.1-mini"),
+        AgentProfile("claude", "Claude", "Anthropic Claude", "analysis", "#d97842", "CLD", "anthropic", "claude-sonnet-4-5"),
+        AgentProfile("gemini", "Gemini", "Google Gemini", "research", "#4d8df7", "GEM", "gemini", "gemini-3.5-flash"),
+        AgentProfile("llama", "Llama", "Meta Llama", "local", "#9b72f2", "LMA", "local", ""),
+        AgentProfile("mistral", "Mistral", "Mistral Large", "coding", "#e0b84f", "MST", "local", ""),
     ]
 
 
@@ -87,6 +88,24 @@ class SimulationState:
         if requested_agent_id:
             message = f"task submitted for {self.agents[requested_agent_id].profile.display_name}"
         self._record("system", AgentAction.REPORTING, Position(WORLD_WIDTH * 0.5, 24), AgentStatus.IDLE, task.id, message)
+        return task
+
+    def create_todo_task(self, prompt: str, submitted_by: str = "operator") -> SubmittedTask:
+        task = self.submit_task(prompt, submitted_by=submitted_by)
+        task.mark_todo()
+        self._record("system", AgentAction.IDLE, Position(24, 24), AgentStatus.IDLE, task.id, "added to todo")
+        return task
+
+    def assign_todo_task(self, task_id: str, agent_id: str) -> SubmittedTask:
+        task = self.tasks[task_id]
+        if agent_id not in self.agents:
+            raise ValueError(f"Unknown agent: {agent_id}")
+        if task.status is not TaskStatus.TODO:
+            raise ValueError(f"Task {task_id} is not in the todo list.")
+        task.requested_agent_id = agent_id
+        task.status = TaskStatus.SUBMITTED
+        task.updated_at = utcnow()
+        self._record(agent_id, AgentAction.REPORTING, self.agents[agent_id].position, AgentStatus.IDLE, task.id, "dropped on agent")
         return task
 
     def update(self, dt: float, telemetry: dict[str, AgentTelemetry] | None = None) -> None:

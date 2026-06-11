@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+import asyncio
+import queue
+import threading
+
 import pygame
 
 from watchtower.auth import AuthConfig
 from watchtower.data_provider import AgentDataProvider, TelemetryPoller
+from watchtower.model_api import ModelApiClient, ModelCallResult
 from watchtower.models import AgentState, SubmittedTask, TaskStatus
 from watchtower.simulation import WORLD_HEIGHT, WORLD_WIDTH, SimulationState
 
 
-SCREEN_WIDTH = 1180
+LEFT_PANEL_WIDTH = 236
+WORLD_X = LEFT_PANEL_WIDTH + 24
+WORLD_Y = 16
+PANEL_X = WORLD_X + WORLD_WIDTH + 16
+SCREEN_WIDTH = PANEL_X + 260
 SCREEN_HEIGHT = 760
-PANEL_X = 920
 BACKGROUND = (13, 17, 23)
 SURFACE = (24, 31, 42)
 SURFACE_2 = (33, 42, 55)
@@ -34,9 +42,13 @@ class WatchtowerApp:
         self.auth_config = AuthConfig.from_env()
         self.provider = AgentDataProvider(self.auth_config)
         self.poller = TelemetryPoller(self.provider, self.simulation.profiles)
+        self.model_api = ModelApiClient()
+        self.model_results: queue.Queue[tuple[str, ModelCallResult | None, str]] = queue.Queue()
+        self.running_model_tasks: set[str] = set()
         self.input_text = ""
         self.flash_message = "Ready"
         self.selected_agent_id: str | None = None
+        self.dragging_task_id: str | None = None
         self.running = True
 
     def run(self) -> None:
@@ -47,6 +59,8 @@ class WatchtowerApp:
                 self._handle_events()
                 provider_snapshot = self.poller.latest()
                 self.simulation.update(dt, provider_snapshot.telemetry)
+                self._drain_model_results()
+                self._start_ready_model_calls()
                 self._draw(provider_snapshot)
                 pygame.display.flip()
         finally:
@@ -69,10 +83,15 @@ class WatchtowerApp:
                 elif event.unicode and len(self.input_text) < 180:
                     self.input_text += event.unicode
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                if self._submit_rect().collidepoint(event.pos):
+                todo_task_id = self._todo_task_at(event.pos)
+                if todo_task_id:
+                    self.dragging_task_id = todo_task_id
+                elif self._submit_rect().collidepoint(event.pos):
                     self._submit_input()
                 else:
                     self._handle_selection_click(event.pos)
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                self._finish_drag(event.pos)
 
     def _submit_input(self) -> None:
         text = self.input_text.strip()
@@ -105,9 +124,13 @@ class WatchtowerApp:
             self.flash_message = "Task routing set to auto"
             return
         requested_agent_id, prompt = self._parse_targeted_prompt(text)
-        task = self.simulation.submit_task(prompt, requested_agent_id=requested_agent_id or self.selected_agent_id)
-        target = self._agent_label(task.requested_agent_id)
-        self.flash_message = f"Task {task.id} submitted to {target}"
+        target_agent_id = requested_agent_id or self.selected_agent_id
+        if target_agent_id:
+            task = self.simulation.submit_task(prompt, requested_agent_id=target_agent_id)
+            self.flash_message = f"Task {task.id} submitted to {self._agent_label(target_agent_id)}"
+        else:
+            task = self.simulation.create_todo_task(prompt)
+            self.flash_message = f"Todo {task.id} added"
 
     def _parse_targeted_prompt(self, text: str) -> tuple[str | None, str]:
         if not text.startswith("@"):
@@ -120,6 +143,7 @@ class WatchtowerApp:
 
     def _draw(self, provider_snapshot) -> None:
         self.screen.fill(BACKGROUND)
+        self._draw_todo_panel()
         self._draw_world()
         snapshot = self.simulation.snapshot()
         for agent in snapshot.agents:
@@ -129,21 +153,20 @@ class WatchtowerApp:
         self._draw_input()
 
     def _draw_world(self) -> None:
-        world = pygame.Rect(16, 16, WORLD_WIDTH, WORLD_HEIGHT)
+        world = pygame.Rect(WORLD_X, WORLD_Y, WORLD_WIDTH, WORLD_HEIGHT)
         pygame.draw.rect(self.screen, (16, 22, 30), world, border_radius=8)
         pygame.draw.rect(self.screen, GRID, world, width=1, border_radius=8)
         for x in range(64, WORLD_WIDTH, 64):
-            pygame.draw.line(self.screen, GRID, (16 + x, 16), (16 + x, 16 + WORLD_HEIGHT), 1)
+            pygame.draw.line(self.screen, GRID, (WORLD_X + x, WORLD_Y), (WORLD_X + x, WORLD_Y + WORLD_HEIGHT), 1)
         for y in range(64, WORLD_HEIGHT, 64):
-            pygame.draw.line(self.screen, GRID, (16, 16 + y), (16 + WORLD_WIDTH, 16 + y), 1)
+            pygame.draw.line(self.screen, GRID, (WORLD_X, WORLD_Y + y), (WORLD_X + WORLD_WIDTH, WORLD_Y + y), 1)
         title = self.title_font.render("Watchtower", True, TEXT)
-        self.screen.blit(title, (34, 30))
+        self.screen.blit(title, (WORLD_X + 18, 30))
         subtitle = self.small_font.render(self.flash_message, True, MUTED)
-        self.screen.blit(subtitle, (36, 60))
+        self.screen.blit(subtitle, (WORLD_X + 20, 60))
 
     def _draw_agent(self, agent: AgentState) -> None:
-        x = int(16 + agent.position.x)
-        y = int(16 + agent.position.y)
+        x, y = self._agent_screen_position(agent)
         color = _hex_to_rgb(agent.profile.accent_color)
         pygame.draw.circle(self.screen, _dim(color, 0.22), (x, y), 30)
         if agent.profile.id == self.selected_agent_id:
@@ -163,7 +186,7 @@ class WatchtowerApp:
     def _draw_task_stations(self, tasks: list[SubmittedTask]) -> None:
         active = [task for task in tasks if task.status in {TaskStatus.ASSIGNED, TaskStatus.IN_PROGRESS}]
         for index, task in enumerate(active[:5]):
-            rect = pygame.Rect(100 + index * 145, WORLD_HEIGHT - 24, 106, 30)
+            rect = pygame.Rect(WORLD_X + 84 + index * 145, WORLD_Y + WORLD_HEIGHT - 40, 106, 30)
             pygame.draw.rect(self.screen, SURFACE_2, rect, border_radius=6)
             pygame.draw.rect(self.screen, ACCENT, rect, width=1, border_radius=6)
             pygame.draw.rect(self.screen, ACCENT, (rect.x, rect.y, int(rect.width * task.progress), 4), border_radius=2)
@@ -184,7 +207,8 @@ class WatchtowerApp:
                 pygame.draw.rect(self.screen, color, row, width=1, border_radius=6)
             pygame.draw.circle(self.screen, color, (PANEL_X + 28, y + 9), 7)
             self._text(agent.profile.model_name, PANEL_X + 44, y, self.font, TEXT)
-            status = f"{agent.status.value} | {agent.metrics.latency_ms:.0f} ms | {agent.metrics.tokens_per_minute:.0f} tpm"
+            connection = "live key" if self.model_api.is_configured(agent.profile) else agent.profile.provider
+            status = f"{agent.status.value} | {connection} | {agent.metrics.latency_ms:.0f} ms"
             self._text(status, PANEL_X + 44, y + 18, self.small_font, MUTED)
             y += 48
 
@@ -200,6 +224,10 @@ class WatchtowerApp:
             self._text(task.title, PANEL_X + 30, y + 7, self.small_font, TEXT)
             route_label = self._agent_label(task.assigned_agent_id or task.requested_agent_id)
             meta = f"{task.status.value} {task.progress * 100:>3.0f}% | {route_label}"
+            if task.model_error:
+                meta = f"api error | {route_label}"
+            elif task.model_response:
+                meta = f"done via api | {route_label}"
             self._text(meta, PANEL_X + 30, y + 27, self.small_font, MUTED)
             y += 58
 
@@ -236,6 +264,66 @@ class WatchtowerApp:
     def _agent_row_rect(self, index: int) -> pygame.Rect:
         return pygame.Rect(PANEL_X + 14, 66 + index * 48, 232, 42)
 
+    def _draw_todo_panel(self) -> None:
+        panel = pygame.Rect(16, 16, LEFT_PANEL_WIDTH, WORLD_HEIGHT)
+        pygame.draw.rect(self.screen, SURFACE, panel, border_radius=8)
+        self._text("Todo", 34, 34, self.title_font, TEXT)
+        self._text("Drag tasks onto agents", 34, 64, self.small_font, MUTED)
+        todo_tasks = [task for task in self.simulation.snapshot().tasks if task.status is TaskStatus.TODO]
+        if not todo_tasks:
+            self._text("Type a task below", 34, 104, self.font, MUTED)
+            self._text("then drag it into play", 34, 126, self.font, MUTED)
+        for index, task in enumerate(todo_tasks[:8]):
+            rect = self._todo_task_rect(index)
+            if task.id == self.dragging_task_id:
+                continue
+            self._draw_todo_card(task, rect)
+        if self.dragging_task_id:
+            task = self.simulation.tasks.get(self.dragging_task_id)
+            if task:
+                mouse_x, mouse_y = pygame.mouse.get_pos()
+                self._draw_todo_card(task, pygame.Rect(mouse_x - 88, mouse_y - 24, 176, 48), ghost=True)
+
+    def _draw_todo_card(self, task: SubmittedTask, rect: pygame.Rect, ghost: bool = False) -> None:
+        fill = SURFACE_2 if not ghost else (45, 58, 74)
+        pygame.draw.rect(self.screen, fill, rect, border_radius=8)
+        pygame.draw.rect(self.screen, ACCENT, rect, width=1, border_radius=8)
+        self._text(task.title[:24], rect.x + 10, rect.y + 8, self.small_font, TEXT)
+        self._text("grab and drop", rect.x + 10, rect.y + 27, self.small_font, MUTED)
+
+    def _todo_task_rect(self, index: int) -> pygame.Rect:
+        return pygame.Rect(32, 96 + index * 58, LEFT_PANEL_WIDTH - 32, 48)
+
+    def _todo_task_at(self, position: tuple[int, int]) -> str | None:
+        todo_tasks = [task for task in self.simulation.snapshot().tasks if task.status is TaskStatus.TODO]
+        for index, task in enumerate(todo_tasks[:8]):
+            if self._todo_task_rect(index).collidepoint(position):
+                return task.id
+        return None
+
+    def _finish_drag(self, position: tuple[int, int]) -> None:
+        if not self.dragging_task_id:
+            return
+        task_id = self.dragging_task_id
+        self.dragging_task_id = None
+        agent_id = self._agent_at(position)
+        if not agent_id:
+            self.flash_message = "Drop the todo on an agent"
+            return
+        self.simulation.assign_todo_task(task_id, agent_id)
+        self.flash_message = f"Todo assigned to {self._agent_label(agent_id)}"
+
+    def _agent_at(self, position: tuple[int, int]) -> str | None:
+        px, py = position
+        for agent in self.simulation.snapshot().agents:
+            ax, ay = self._agent_screen_position(agent)
+            if (px - ax) ** 2 + (py - ay) ** 2 <= 38**2:
+                return agent.profile.id
+        return None
+
+    def _agent_screen_position(self, agent: AgentState) -> tuple[int, int]:
+        return int(WORLD_X + agent.position.x), int(WORLD_Y + agent.position.y)
+
     def _handle_selection_click(self, position: tuple[int, int]) -> None:
         for index, agent in enumerate(self.simulation.snapshot().agents):
             if self._agent_row_rect(index).collidepoint(position):
@@ -258,6 +346,55 @@ class WatchtowerApp:
             return "auto"
         agent = self.simulation.agents.get(agent_id)
         return agent.profile.display_name if agent else agent_id
+
+    def _start_ready_model_calls(self) -> None:
+        for task in self.simulation.tasks.values():
+            if task.status not in {TaskStatus.ASSIGNED, TaskStatus.IN_PROGRESS}:
+                continue
+            if task.api_started or task.id in self.running_model_tasks or not task.assigned_agent_id:
+                continue
+            agent = self.simulation.agents[task.assigned_agent_id]
+            if not self.model_api.is_configured(agent.profile):
+                continue
+            task.api_started = True
+            self.running_model_tasks.add(task.id)
+            thread = threading.Thread(
+                target=self._run_model_task,
+                args=(task.id, agent.profile, task.prompt),
+                name=f"watchtower-model-{task.id}",
+                daemon=True,
+            )
+            thread.start()
+
+    def _run_model_task(self, task_id: str, profile, prompt: str) -> None:
+        try:
+            result = asyncio.run(self.model_api.run_task(profile, prompt))
+            self.model_results.put((task_id, result, ""))
+        except Exception as exc:
+            self.model_results.put((task_id, None, f"{type(exc).__name__}: {exc}"))
+
+    def _drain_model_results(self) -> None:
+        while True:
+            try:
+                task_id, result, error = self.model_results.get_nowait()
+            except queue.Empty:
+                return
+            self.running_model_tasks.discard(task_id)
+            task = self.simulation.tasks.get(task_id)
+            if not task:
+                continue
+            agent_id = task.assigned_agent_id
+            if error:
+                task.mark_model_error(error[:180])
+                if agent_id:
+                    self.simulation.agents[agent_id].current_task_id = None
+                self.flash_message = f"{task.id} API error"
+                continue
+            if result:
+                task.mark_model_result(result.text[:1000])
+                if agent_id:
+                    self.simulation.agents[agent_id].current_task_id = None
+                self.flash_message = f"{task.id} completed by {self._agent_label(agent_id)}"
 
 
 def _hex_to_rgb(value: str) -> tuple[int, int, int]:

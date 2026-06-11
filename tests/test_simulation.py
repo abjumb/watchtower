@@ -25,6 +25,27 @@ def test_task_can_target_specific_agent() -> None:
     assert simulation.agents["mistral"].current_task_id == task.id
 
 
+def test_todo_task_waits_until_dropped_on_agent() -> None:
+    simulation = SimulationState()
+    task = simulation.create_todo_task("Review the vibe")
+
+    simulation.update(0.1)
+
+    assert task.status is TaskStatus.TODO
+    assert task.assigned_agent_id is None
+
+
+def test_todo_task_can_be_dropped_on_agent() -> None:
+    simulation = SimulationState()
+    task = simulation.create_todo_task("Review the vibe")
+
+    simulation.assign_todo_task(task.id, "claude")
+    simulation.update(0.1)
+
+    assert task.assigned_agent_id == "claude"
+    assert task.status is TaskStatus.IN_PROGRESS
+
+
 def test_targeted_task_waits_for_busy_agent() -> None:
     simulation = SimulationState()
     first = simulation.submit_task("First", requested_agent_id="gpt")

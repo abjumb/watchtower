@@ -14,7 +14,8 @@ python -m venv .venv
 
 ## Controls
 
-- Type a task and press Enter or click Submit.
+- Type a task and press Enter or click Submit to add it to the left-side todo list.
+- Drag a todo card onto an agent in the world to assign it.
 - Click a model in the side panel, or press Ctrl/Alt/Meta + 1-5, to route new tasks to that model.
 - Prefix a task with an agent id for one-off targeting, for example `@gpt summarize these logs`.
 - `/auto` returns to load-based routing.
@@ -22,6 +23,26 @@ python -m venv .venv
 - `/auth token YOUR_OAUTH_TOKEN`
 - `/auth login USERNAME PASSWORD`
 - Escape quits.
+
+## Model API Connections
+
+Set provider keys in the environment before launching Watchtower:
+
+```bash
+export OPENAI_API_KEY="..."
+export ANTHROPIC_API_KEY="..."
+export GEMINI_API_KEY="..."
+.venv/bin/python -m watchtower
+```
+
+The built-in agents map to:
+
+- GPT -> OpenAI Responses API (`gpt-5.1-mini` by default)
+- Claude -> Anthropic Messages API
+- Gemini -> Gemini `generateContent` (`gemini-3.5-flash` by default)
+- Llama and Mistral -> local demo agents for now
+
+Without a provider key, that agent still animates in demo mode and task progress is simulated locally.
 
 ## Telemetry Contract
 

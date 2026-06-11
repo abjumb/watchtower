@@ -33,6 +33,7 @@ class AgentAction(str, Enum):
 
 
 class TaskStatus(str, Enum):
+    TODO = "todo"
     SUBMITTED = "submitted"
     ASSIGNED = "assigned"
     IN_PROGRESS = "in_progress"
@@ -65,6 +66,8 @@ class AgentProfile:
     role: str = "general"
     accent_color: str = "#4f8cff"
     glyph: str = "AI"
+    provider: str = "local"
+    api_model: str = ""
 
 
 @dataclass(slots=True)
@@ -107,6 +110,10 @@ class SubmittedTask:
     assigned_agent_id: str | None = None
     progress: float = 0.0
     estimated_tokens: int = 1_000
+    model_response: str = ""
+    model_error: str = ""
+    api_started: bool = False
+    api_completed: bool = False
     created_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
 
@@ -118,6 +125,23 @@ class SubmittedTask:
     def mark_progress(self, progress: float) -> None:
         self.progress = clamp(progress)
         self.status = TaskStatus.COMPLETE if self.progress >= 1.0 else TaskStatus.IN_PROGRESS
+        self.updated_at = utcnow()
+
+    def mark_todo(self) -> None:
+        self.status = TaskStatus.TODO
+        self.updated_at = utcnow()
+
+    def mark_model_result(self, response: str) -> None:
+        self.model_response = response
+        self.api_completed = True
+        self.progress = 1.0
+        self.status = TaskStatus.COMPLETE
+        self.updated_at = utcnow()
+
+    def mark_model_error(self, error: str) -> None:
+        self.model_error = error
+        self.api_completed = True
+        self.status = TaskStatus.FAILED
         self.updated_at = utcnow()
 
 
