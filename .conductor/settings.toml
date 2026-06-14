@@ -1,0 +1,27 @@
+#:schema https://conductor.build/schemas/settings.repo.schema.json
+
+[scripts]
+# uv.lock is committed, so uv is the project's package manager. `uv sync` installs
+# from the lockfile AND auto-provisions a compatible interpreter (requires-python
+# >=3.11,<3.14), which sidesteps the Pygame-on-3.14 build failure noted in the docs.
+# If uv is missing (fresh machine, teammate, cloud workspace) we install it first so
+# setup never fails with "uv: command not found". pytest is not a declared dependency,
+# so it is added into the same venv (non-destructive; does not touch uv.lock) to leave
+# the workspace ready to run the test suite with `uv run python -m pytest`.
+setup = """
+command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+uv sync
+uv pip install pytest
+"""
+
+# Desktop Pygame GUI app with no network port to bind, so no CONDUCTOR_PORT.
+# Prepend ~/.local/bin so uv is found without relying on interactive shell startup.
+run = """
+export PATH="$HOME/.local/bin:$PATH"
+uv run watchtower
+"""
+
+# Each run is an independent GUI window with no shared local resource
+# (no fixed port, database, or Docker stack), so workspaces can run at once.
+run_mode = "concurrent"
