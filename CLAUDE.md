@@ -1,0 +1,134 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Overview
+
+Watchtower is a top-down Pygame simulation for watching distinct AI model agents
+(GPT, Claude, Gemini, Llama, Mistral) accept tasks and move through realtime
+actions. Operators submit prompts, route them to agents, and watch progress as
+animated motion in a 2D world while live telemetry and (optionally) real model
+API calls drive the state.
+
+## Commands
+
+Requires Python 3.11–3.13 (`requires-python = ">=3.11,<3.14"`). Python 3.14 will
+try to build Pygame from source and fail without SDL headers.
+
+```bash
+python -m venv .venv
+.venv/bin/python -m pip install -e .   # installs httpx, pygame, ipykernel
+.venv/bin/python -m watchtower          # launch the app (also: `watchtower` script entrypoint)
+```
+
+Tests are pytest-style functions but `pytest` is **not** a declared dependency —
+install it into the venv first:
+
+```bash
+.venv/bin/python -m pip install pytest
+.venv/bin/python -m pytest                              # all tests
+.venv/bin/python -m pytest tests/test_simulation.py     # one file
+.venv/bin/python -m pytest tests/test_ui.py::test_dragging_todo_to_agent_assigns_task  # one test
+```
+
+UI tests run headless by setting `SDL_VIDEODRIVER=dummy` (see top of
+`tests/test_ui.py`); any test that constructs `WatchtowerApp` must do this and
+must call `app.poller.stop()` + `pygame.quit()` in a `finally` block, since the
+constructor starts a background telemetry thread and initializes pygame.
+
+## Architecture
+
+The app is a single-process, 60 FPS pygame loop with background worker threads
+feeding it via thread-safe handoffs. Data flows in one direction each frame:
+threads → snapshot/queue → `SimulationState.update()` → draw.
+
+### Layers (in `watchtower/`)
+
+- **`models.py`** — Pure dataclasses and enums, the shared vocabulary. No I/O, no
+  pygame. `AgentStatus`/`AgentAction`/`TaskStatus`/`TaskPriority` enums,
+  `AgentProfile` (static identity incl. `provider`/`api_model`), `AgentState`
+  (live position/status/metrics), `SubmittedTask` (carries its own state
+  transitions via `assign_to`/`mark_progress`/`mark_model_result`/etc.), and
+  `AgentMetrics`. `utcnow()` and `clamp()` live here.
+- **`simulation.py`** — `SimulationState` is the authoritative game model. It owns
+  agents and tasks, runs the per-frame `update(dt, telemetry)` that assigns
+  waiting tasks, advances agent motion (`_move_toward`, orbit/patrol math), and
+  drives task progress. `default_profiles()` defines the five built-in agents and
+  their provider/model mappings. `WORLD_WIDTH`/`WORLD_HEIGHT` are the simulation
+  coordinate space (not screen pixels). `snapshot()` returns an immutable view for
+  rendering.
+- **`data_provider.py`** — Telemetry ingestion. `AgentDataProvider.fetch_all()` is
+  async (httpx) and either hits `GET /agents/{id}/telemetry` on the configured
+  endpoint or returns deterministic `_demo_telemetry` (sine-wave fake metrics).
+  `TelemetryPoller` runs this on a daemon thread every ~2s and exposes the latest
+  `ProviderSnapshot` behind a lock via `latest()`. Remote failures degrade
+  gracefully to demo data rather than crashing.
+- **`model_api.py`** — Real LLM calls. `ModelApiClient.run_task(profile, prompt)`
+  dispatches on `profile.provider` to OpenAI Responses, Anthropic Messages, or
+  Gemini generateContent endpoints (raw httpx, no SDKs). `local` providers
+  (Llama/Mistral) return a stub string. `_extract_text` recursively flattens the
+  differently-shaped provider response payloads. Keys come from
+  `OPENAI_API_KEY`/`ANTHROPIC_API_KEY`/`GEMINI_API_KEY`.
+- **`auth.py`** — `AuthConfig` for the *telemetry* endpoint (separate from model
+  API keys). Supports OAuth bearer, basic login, or demo mode; `mode` and
+  `is_remote_enabled` decide whether the provider goes remote.
+- **`ui.py`** — `WatchtowerApp` owns the pygame window, event loop, all drawing,
+  and the wiring between the above. This is the only module that mounts the parts
+  together. Layout constants (`LEFT_PANEL_WIDTH`, `WORLD_X`, `PANEL_X`,
+  `SCREEN_*`) and the color palette live at the top.
+- **`app.py` / `__main__.py`** — Thin entrypoints; `main()` just runs
+  `WatchtowerApp().run()`.
+
+### Concurrency model
+
+`ui.py` is the only place threads meet the game loop, and it never shares mutable
+state across threads directly:
+- Telemetry: the poller thread writes a `ProviderSnapshot`; the loop reads it via
+  `poller.latest()` and passes `.telemetry` into `simulation.update()`.
+- Model calls: `_start_ready_model_calls()` spawns a daemon thread per task that
+  runs `model_api.run_task` (via `asyncio.run`) and pushes the result onto a
+  `queue.Queue`. `_drain_model_results()` consumes that queue on the main thread
+  and applies it to the simulation. `task.api_started` + `running_model_tasks`
+  guard against double-dispatch.
+
+Only agents whose provider has a live API key get real model calls; everyone else
+animates with locally-simulated progress in `_advance_agent`.
+
+### Task lifecycle
+
+`TODO` (in left panel, must be dragged onto an agent) → `SUBMITTED` (queued for
+routing) → `ASSIGNED` → `IN_PROGRESS` → `COMPLETE`/`FAILED`. Routing in
+`_assign_waiting_tasks`/`_candidate_agents`: a `requested_agent_id` pins the task
+to one agent (and waits if it's busy); otherwise the least-loaded free agent wins.
+
+### Input commands (parsed in `ui.py:_submit_input`)
+
+- `@<agent> <prompt>` — one-off target a specific agent.
+- `/auto` — clear selection, return to load-based routing.
+- `/endpoint <url>`, `/auth token <tok>`, `/auth login <user> <pass>` — reconfigure
+  the telemetry feed at runtime; these rebuild `AuthConfig` and call
+  `poller.configure()`.
+- Ctrl/Alt/Meta + 1–5 selects an agent (a bare number key is text input).
+
+## Conventions
+
+- All modules use `from __future__ import annotations` and modern typing
+  (`X | None`, builtin generics).
+- Dataclasses use `slots=True`. State transitions are methods on the dataclass
+  (e.g. `SubmittedTask.mark_model_result`) rather than mutated externally.
+- Keep `models.py` and `simulation.py` free of pygame and network I/O so the
+  simulation stays unit-testable headlessly (the existing tests drive
+  `SimulationState.update` directly with no display).
+- Provider response parsing should go through `_extract_text` rather than indexing
+  into provider-specific JSON shapes.
+
+When changing agent roster, provider names, or default models, update
+`default_profiles()` in `simulation.py` — `model_api.py` dispatches on the
+`provider` string and `data_provider.py` keys telemetry by `profile.id`.
+
+## Design intent
+
+See `.design-context.md`: the target audience is casual "vibe coders"; the vibe is
+chill, playful, game-like (not a technical command center). New UI must support
+both dark (default) and light modes with shared semantic colors, and must not slow
+down the keyboard-first task flow.
