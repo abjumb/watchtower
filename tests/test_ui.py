@@ -1,6 +1,7 @@
 import os
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+os.environ.setdefault("WATCHTOWER_NO_AUTOSAVE", "1")
 
 import contextlib
 
@@ -169,3 +170,157 @@ def test_resize_clamps_to_minimum_and_moves_submit_button() -> None:
         app._resize(1600, 900)
         assert app.screen_width == 1600
         assert app._submit_rect().x == 1600 - 120
+
+
+def test_compare_overlay_opens_from_detail_and_renders() -> None:
+    with make_app() as app:
+        tasks = app.simulation.submit_comparison("which is best?")
+        group_id = tasks[0].group_id
+        app.selected_task_id = tasks[0].id
+        app._detail_action("Group", tasks[0])
+        assert app.compare_group_id == group_id
+        assert app.selected_task_id is None
+        grouped = app._group_tasks(group_id)
+        assert len(grouped) == len(app.simulation.agents)
+        _render_frame(app)  # compare overlay draws without error
+        # clicking outside the overlay closes it
+        app._handle_mouse_down((2, 2))
+        assert app.compare_group_id is None
+
+
+def test_clicking_world_agent_opens_inspect_overlay() -> None:
+    with make_app() as app:
+        agent = app.simulation.agents["gpt"]
+        app._handle_mouse_down(app._agent_screen_position(agent))
+        assert app.inspect_agent_id == "gpt"
+        _render_frame(app)
+        rect = app._inspect_rect()
+        route_rect = app._inspect_button_rects(rect)["Route here"]
+        app._handle_mouse_down(route_rect.center)
+        assert app.selected_agent_id == "gpt"
+        assert app.inspect_agent_id is None
+
+
+def test_inspect_overlay_remove_button_drops_agent() -> None:
+    with make_app() as app:
+        app.inspect_agent_id = "mistral"
+        _render_frame(app)
+        rect = app._inspect_rect()
+        remove_rect = app._inspect_button_rects(rect)["Remove"]
+        app._handle_mouse_down(remove_rect.center)
+        assert "mistral" not in app.simulation.agents
+        assert all(p.id != "mistral" for p in app.poller._profiles)
+
+
+def test_keyboard_navigation_opens_focused_task() -> None:
+    with make_app() as app:
+        app.simulation.create_todo_task("first")
+        app.simulation.create_todo_task("second")
+        app._move_task_cursor(1)
+        assert app.task_cursor == 1
+        app.input_text = ""
+        app._handle_return()  # empty input -> open focused task
+        tasks = app.simulation.snapshot().tasks
+        assert app.selected_task_id == tasks[1].id
+
+
+def test_metric_history_samples_over_time() -> None:
+    with make_app() as app:
+        app._sample_metrics(1.0)  # well past SPARK_INTERVAL
+        app._sample_metrics(1.0)
+        assert all(len(hist) >= 1 for hist in app.metric_history.values())
+        assert set(app.metric_history) == set(app.simulation.agents)
+
+
+def test_removing_agent_requeues_inflight_task_and_ignores_stale_result() -> None:
+    from watchtower.model_api import ModelCallResult
+
+    with make_app() as app:
+        task = app.simulation.submit_task("work", requested_agent_id="gpt")
+        app.simulation.update(0.1)  # assign to gpt
+        # mimic a dispatched model call
+        task.api_started = True
+        app.running_model_tasks.add(task.id)
+        app._dispatch_seq += 1
+        old_token = app._dispatch_seq
+        app._dispatch_token[task.id] = old_token
+
+        requeued = app.simulation.remove_agent("gpt")
+        app._invalidate_dispatches(requeued)
+
+        assert task.id in requeued
+        assert task.status is TaskStatus.SUBMITTED
+        assert task.api_started is False
+        assert task.id not in app.running_model_tasks
+        assert task.id not in app._dispatch_token
+
+        # the requeued task gets a new home instead of being skipped forever
+        app.simulation.update(0.1)
+        assert task.assigned_agent_id in app.simulation.agents
+
+        # a late result from the removed agent's dispatch must be ignored
+        app.model_results.put(("done", task.id, old_token, ModelCallResult("gpt", "stale", 1.0)))
+        app._drain_model_results()
+        assert task.model_response == ""
+        assert task.status is not TaskStatus.COMPLETE
+
+
+def test_matching_dispatch_result_completes_task() -> None:
+    from watchtower.model_api import ModelCallResult
+
+    with make_app() as app:
+        task = app.simulation.submit_task("work", requested_agent_id="gpt")
+        app.simulation.update(0.1)
+        app._dispatch_seq += 1
+        token = app._dispatch_seq
+        app._dispatch_token[task.id] = token
+        app.running_model_tasks.add(task.id)
+        app.model_results.put(("done", task.id, token, ModelCallResult("gpt", "real answer", 5.0, total_tokens=12)))
+        app._drain_model_results()
+        assert task.status is TaskStatus.COMPLETE
+        assert task.model_response == "real answer"
+        assert task.actual_tokens == 12
+        assert task.id not in app._dispatch_token
+
+
+def test_arrow_keys_do_not_move_cursor_while_typing() -> None:
+    with make_app() as app:
+        app.simulation.create_todo_task("one")
+        app.simulation.create_todo_task("two")
+        app.input_text = "drafting a prompt"
+        before = app.task_cursor
+        app._handle_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_DOWN, mod=0, unicode=""))
+        assert app.task_cursor == before  # gated while input has text
+        app.input_text = ""
+        app._handle_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_DOWN, mod=0, unicode=""))
+        assert app.task_cursor == before + 1
+
+
+def test_comparison_overlay_paginates_large_group() -> None:
+    with make_app() as app:
+        for i in range(8):  # grow the roster well past one screen of cards
+            from watchtower.models import AgentProfile
+
+            app.simulation.add_agent(AgentProfile(f"x{i}", f"X{i}", f"X{i} model", provider="local"))
+        tasks = app.simulation.submit_comparison("compare everyone")
+        app.compare_group_id = tasks[0].group_id
+        _render_frame(app)  # must not raise even with many cards
+        assert app.compare_scroll == 0
+        app.compare_scroll = 999
+        _render_frame(app)  # draw clamps an out-of-range scroll
+        assert app.compare_scroll < len(app.simulation.agents)
+
+
+def test_autosave_round_trips_via_patched_path(tmp_path, monkeypatch) -> None:
+    import watchtower.ui as ui_module
+
+    monkeypatch.setattr(ui_module, "AUTOSAVE_PATH", tmp_path / "autosave.json")
+    monkeypatch.delenv("WATCHTOWER_NO_AUTOSAVE", raising=False)
+    with make_app() as app:
+        app.simulation.submit_task("persist me", requested_agent_id="gpt")
+        app._autosave()
+        assert (tmp_path / "autosave.json").exists()
+
+    # a fresh app should restore the autosaved task
+    with make_app() as app2:
+        assert any(task.prompt == "persist me" for task in app2.simulation.tasks.values())

@@ -93,7 +93,14 @@ threads → snapshot/queue → `SimulationState.update()` → draw.
   constants. Layout constants (`LEFT_PANEL_WIDTH`, `WORLD_X`, `PANEL_X`) live at the
   top; the window is resizable and `self.screen_width`/`self.screen_height` track the
   current size (clamped to `MIN_WIDTH`/`MIN_HEIGHT`). Overlays (`_draw_detail`,
-  `_draw_help`) and completion effects render on top of the base scene.
+  `_draw_compare`, `_draw_inspect`, `_draw_help`) and completion effects render on top
+  of the base scene; only one is interactive at a time. Per-agent load history for the
+  panel sparklines lives in `self.metric_history` (sampled every `SPARK_INTERVAL`), and
+  the session auto-saves to `AUTOSAVE_PATH` (`~/.watchtower/autosave.json`) every
+  `AUTOSAVE_INTERVAL` and on quit, restoring on launch unless `WATCHTOWER_NO_AUTOSAVE`
+  is set. The detail overlay shows a token/cost readout (`PRICE_PER_1K`, deliberately
+  coarse) using `ModelCallResult.total_tokens` when the provider reports usage
+  (`model_api._total_tokens`) or a length-based estimate otherwise.
 - **`app.py` / `__main__.py`** — Thin entrypoints; `main()` just runs
   `WatchtowerApp().run()`.
 

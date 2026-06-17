@@ -94,6 +94,7 @@ class SimulationState:
             submitted_by=submitted_by,
             requested_agent_id=requested_agent_id,
             priority=priority,
+            estimated_tokens=200 + len(clean_prompt) // 4,
             group_id=group_id,
         )
         self.tasks[task.id] = task
@@ -167,19 +168,21 @@ class SimulationState:
         self._record("system", AgentAction.IDLE, Position(WORLD_WIDTH * 0.5, 24), AgentStatus.IDLE, None, f"added agent {profile.display_name}")
         return self.agents[profile.id]
 
-    def remove_agent(self, agent_id: str) -> None:
+    def remove_agent(self, agent_id: str) -> list[str]:
         if agent_id not in self.agents:
             raise ValueError(f"Unknown agent: {agent_id}")
+        requeued: list[str] = []
         for task in self.tasks.values():
             if task.assigned_agent_id == agent_id and task.is_active:
-                task.status = TaskStatus.SUBMITTED
-                task.assigned_agent_id = None
+                task.reset_for_retry()  # clears assignment + api_started so it can rerun cleanly
+                requeued.append(task.id)
             if task.requested_agent_id == agent_id:
                 task.requested_agent_id = None
         self.agents.pop(agent_id)
         self.profiles = [profile for profile in self.profiles if profile.id != agent_id]
         self._layout_agents()
         self._record("system", AgentAction.IDLE, Position(WORLD_WIDTH * 0.5, 24), AgentStatus.IDLE, None, f"removed agent {agent_id}")
+        return requeued
 
     def _free_agent_for(self, task_id: str) -> None:
         for agent in self.agents.values():

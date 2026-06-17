@@ -10,6 +10,7 @@ from watchtower.model_api import (
     _gemini_delta,
     _openai_chat_delta,
     _openai_responses_delta,
+    _total_tokens,
 )
 from watchtower.models import AgentProfile, TaskPriority, TaskStatus
 from watchtower.persistence import load_session, save_session
@@ -148,6 +149,36 @@ def test_session_round_trips_through_disk(tmp_path) -> None:
     assert restored.model_response == "kept text"
     assert restored.status is TaskStatus.COMPLETE
     assert restored.model_latency_ms == 120
+
+
+def test_session_round_trips_token_usage(tmp_path) -> None:
+    simulation = SimulationState()
+    task = simulation.submit_task("count tokens", requested_agent_id="gpt")
+    task.mark_model_result("answer", latency_ms=10, tokens=321)
+    path = tmp_path / "s.json"
+
+    save_session(path, simulation.profiles, list(simulation.tasks.values()))
+    _, tasks = load_session(path)
+
+    assert next(t for t in tasks if t.id == task.id).actual_tokens == 321
+
+
+def test_total_tokens_handles_provider_usage_shapes() -> None:
+    assert _total_tokens({"usage": {"total_tokens": 42}}) == 42
+    assert _total_tokens({"usage": {"input_tokens": 10, "output_tokens": 5}}) == 15
+    assert _total_tokens({"usage": {"prompt_tokens": 7, "completion_tokens": 3}}) == 10
+    assert _total_tokens({"usageMetadata": {"totalTokenCount": 99}}) == 99
+    assert _total_tokens({"nothing": True}) == 0
+
+
+def test_total_tokens_tolerates_malformed_usage() -> None:
+    # null / non-numeric usage values must not raise (would turn a good response into an error)
+    assert _total_tokens({"usage": {"total_tokens": None}}) == 0
+    assert _total_tokens({"usage": {"total_tokens": "unknown"}}) == 0
+    assert _total_tokens({"usage": {"prompt_tokens": "x", "completion_tokens": None}}) == 0
+    assert _total_tokens({"usage": "nope"}) == 0
+    assert _total_tokens({"usageMetadata": {"totalTokenCount": "n/a"}}) == 0
+    assert _total_tokens(None) == 0
 
 
 def test_local_provider_key_detection_and_runtime_set() -> None:

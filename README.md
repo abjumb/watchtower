@@ -16,15 +16,21 @@ python -m venv .venv
 
 - Type a task and press Enter or click Submit to add it to the left-side todo list.
 - Drag a todo card onto an agent in the world to assign it.
-- Click a model in the side panel or an agent in the world, or press Ctrl/Alt/Meta + 1-5, to route new tasks to that model.
-- Click a task (panel card or world station) to open its detail view with the prompt, the model's full response, and Retry / Cancel / Export / Delete actions.
-- Mouse wheel scrolls the task list. `F1` toggles the help overlay; `F2` toggles dark/light theme.
+- Click a model in the side panel, or press Ctrl/Alt/Meta + 1-5, to route new tasks to that model.
+- Click an agent in the world to open its **inspect overlay** (full metrics, current task, recent activity, and a "Route here" button).
+- Click a task (panel card or world station) to open its detail view with the prompt, the model's full response, a **token/cost estimate**, and Retry / Cancel / Export / Group / Delete actions.
+- Up / Down arrows move the keyboard cursor through the task list; with the input box empty, Enter opens the focused task.
+- Mouse wheel scrolls the task list. Each model row shows a small **load sparkline**. `F1` toggles the help overlay; `F2` toggles dark/light theme.
 - Escape closes an open overlay, or quits.
+
+The session **auto-saves** to `~/.watchtower/autosave.json` and is restored on the next launch
+(set `WATCHTOWER_NO_AUTOSAVE=1` to disable).
 
 ### Targeting and priority
 
 - `@gpt summarize these logs` — one-off target a specific agent.
-- `@all <prompt>` (or `/compare <prompt>`) — fan the same prompt to every agent and compare answers.
+- `@all <prompt>` (or `/compare <prompt>`) — fan the same prompt to every agent; open any of the
+  resulting tasks and click **Group** to see all answers side by side in the comparison overlay.
 - `!high <prompt>` — set priority (`low`, `normal`, `high`, `critical`); higher priority is scheduled first under contention.
 - `/auto` returns to load-based routing.
 

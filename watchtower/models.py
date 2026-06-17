@@ -115,6 +115,7 @@ class SubmittedTask:
     assigned_agent_id: str | None = None
     progress: float = 0.0
     estimated_tokens: int = 1_000
+    actual_tokens: int = 0
     model_response: str = ""
     model_partial: str = ""
     model_error: str = ""
@@ -155,9 +156,10 @@ class SubmittedTask:
         self.status = TaskStatus.IN_PROGRESS
         self.updated_at = utcnow()
 
-    def mark_model_result(self, response: str, latency_ms: float = 0.0) -> None:
+    def mark_model_result(self, response: str, latency_ms: float = 0.0, tokens: int = 0) -> None:
         self.model_response = response
         self.model_latency_ms = latency_ms
+        self.actual_tokens = tokens
         self.api_completed = True
         self.progress = 1.0
         self.status = TaskStatus.COMPLETE
@@ -182,6 +184,7 @@ class SubmittedTask:
         self.model_partial = ""
         self.model_error = ""
         self.model_latency_ms = 0.0
+        self.actual_tokens = 0
         self.api_started = False
         self.api_completed = False
         self.updated_at = utcnow()
