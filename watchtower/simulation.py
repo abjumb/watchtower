@@ -25,6 +25,10 @@ from watchtower.models import (
 WORLD_WIDTH = 900
 WORLD_HEIGHT = 620
 
+# Synthetic progress holds here while a real model call is in flight; the API
+# result is what finally drives the task to 1.0.
+_API_PROGRESS_CEILING = 0.9
+
 
 def default_profiles() -> list[AgentProfile]:
     return [
@@ -53,21 +57,29 @@ class SimulationState:
     event_log: deque[AgentActionEvent] = field(default_factory=lambda: deque(maxlen=80))
     tick: int = 0
     elapsed_seconds: float = 0.0
+    max_finished_tasks: int = 60
 
     def __post_init__(self) -> None:
         self.agents = {}
+        self._layout_agents()
+
+    def _layout_agents(self) -> None:
         spacing = WORLD_WIDTH / (len(self.profiles) + 1)
         for index, profile in enumerate(self.profiles, start=1):
-            self.agents[profile.id] = AgentState(
-                profile=profile,
-                position=Position(spacing * index, WORLD_HEIGHT * 0.45),
-            )
+            target = Position(spacing * index, WORLD_HEIGHT * 0.45)
+            existing = self.agents.get(profile.id)
+            if existing is None:
+                self.agents[profile.id] = AgentState(profile=profile, position=target)
+            else:
+                existing.profile = profile
 
     def submit_task(
         self,
         prompt: str,
         submitted_by: str = "operator",
         requested_agent_id: str | None = None,
+        priority: TaskPriority = TaskPriority.NORMAL,
+        group_id: str | None = None,
     ) -> SubmittedTask:
         clean_prompt = prompt.strip()
         if not clean_prompt:
@@ -81,7 +93,8 @@ class SimulationState:
             prompt=clean_prompt,
             submitted_by=submitted_by,
             requested_agent_id=requested_agent_id,
-            priority=TaskPriority.NORMAL,
+            priority=priority,
+            group_id=group_id,
         )
         self.tasks[task.id] = task
         message = "task submitted"
@@ -90,11 +103,89 @@ class SimulationState:
         self._record("system", AgentAction.REPORTING, Position(WORLD_WIDTH * 0.5, 24), AgentStatus.IDLE, task.id, message)
         return task
 
-    def create_todo_task(self, prompt: str, submitted_by: str = "operator") -> SubmittedTask:
-        task = self.submit_task(prompt, submitted_by=submitted_by)
+    def submit_comparison(
+        self,
+        prompt: str,
+        submitted_by: str = "operator",
+        priority: TaskPriority = TaskPriority.NORMAL,
+    ) -> list[SubmittedTask]:
+        """Fan the same prompt out to every agent so their answers can be compared."""
+        group_id = uuid.uuid4().hex[:8]
+        tasks = [
+            self.submit_task(
+                prompt,
+                submitted_by=submitted_by,
+                requested_agent_id=agent_id,
+                priority=priority,
+                group_id=group_id,
+            )
+            for agent_id in self.agents
+        ]
+        self._record("system", AgentAction.REPORTING, Position(WORLD_WIDTH * 0.5, 24), AgentStatus.IDLE, group_id, f"compare across {len(tasks)} agents")
+        return tasks
+
+    def create_todo_task(
+        self,
+        prompt: str,
+        submitted_by: str = "operator",
+        priority: TaskPriority = TaskPriority.NORMAL,
+    ) -> SubmittedTask:
+        task = self.submit_task(prompt, submitted_by=submitted_by, priority=priority)
         task.mark_todo()
         self._record("system", AgentAction.IDLE, Position(24, 24), AgentStatus.IDLE, task.id, "added to todo")
         return task
+
+    def cancel_task(self, task_id: str) -> SubmittedTask:
+        task = self.tasks[task_id]
+        task.cancel()
+        self._free_agent_for(task_id)
+        self._record(task.assigned_agent_id or "system", AgentAction.IDLE, Position(WORLD_WIDTH * 0.5, 24), AgentStatus.IDLE, task_id, "cancelled")
+        return task
+
+    def retry_task(self, task_id: str) -> SubmittedTask:
+        task = self.tasks[task_id]
+        self._free_agent_for(task_id)
+        task.reset_for_retry()
+        self._record("system", AgentAction.REPORTING, Position(WORLD_WIDTH * 0.5, 24), AgentStatus.IDLE, task_id, "retry queued")
+        return task
+
+    def remove_task(self, task_id: str) -> None:
+        self._free_agent_for(task_id)
+        self.tasks.pop(task_id, None)
+
+    def clear_finished(self) -> int:
+        finished = [task_id for task_id, task in self.tasks.items() if task.is_finished]
+        for task_id in finished:
+            self.tasks.pop(task_id, None)
+        return len(finished)
+
+    def add_agent(self, profile: AgentProfile) -> AgentState:
+        if profile.id in self.agents:
+            raise ValueError(f"Agent already exists: {profile.id}")
+        self.profiles.append(profile)
+        self._layout_agents()
+        self._record("system", AgentAction.IDLE, Position(WORLD_WIDTH * 0.5, 24), AgentStatus.IDLE, None, f"added agent {profile.display_name}")
+        return self.agents[profile.id]
+
+    def remove_agent(self, agent_id: str) -> None:
+        if agent_id not in self.agents:
+            raise ValueError(f"Unknown agent: {agent_id}")
+        for task in self.tasks.values():
+            if task.assigned_agent_id == agent_id and task.is_active:
+                task.status = TaskStatus.SUBMITTED
+                task.assigned_agent_id = None
+            if task.requested_agent_id == agent_id:
+                task.requested_agent_id = None
+        self.agents.pop(agent_id)
+        self.profiles = [profile for profile in self.profiles if profile.id != agent_id]
+        self._layout_agents()
+        self._record("system", AgentAction.IDLE, Position(WORLD_WIDTH * 0.5, 24), AgentStatus.IDLE, None, f"removed agent {agent_id}")
+
+    def _free_agent_for(self, task_id: str) -> None:
+        for agent in self.agents.values():
+            if agent.current_task_id == task_id:
+                agent.current_task_id = None
+                agent.status = AgentStatus.IDLE
 
     def assign_todo_task(self, task_id: str, agent_id: str) -> SubmittedTask:
         task = self.tasks[task_id]
@@ -119,6 +210,7 @@ class SimulationState:
                 agent.metrics = remote.metrics
                 agent.status = remote.status if agent.current_task_id is None else AgentStatus.WORKING
             self._advance_agent(index, agent, dt)
+        self._prune_finished()
 
     def snapshot(self) -> SimulationSnapshot:
         tasks = sorted(self.tasks.values(), key=lambda task: task.created_at, reverse=True)
@@ -131,7 +223,10 @@ class SimulationState:
         )
 
     def _assign_waiting_tasks(self) -> None:
-        waiting = [task for task in self.tasks.values() if task.status is TaskStatus.SUBMITTED]
+        waiting = sorted(
+            (task for task in self.tasks.values() if task.status is TaskStatus.SUBMITTED),
+            key=lambda task: (task.priority.rank, task.created_at),
+        )
         for task in waiting:
             candidates = self._candidate_agents(task)
             if not candidates:
@@ -163,7 +258,13 @@ class SimulationState:
                 return
             target = self._task_station(index)
             agent.position = _move_toward(agent.position, target, 150 * dt)
-            task.mark_progress(task.progress + dt * (0.10 + 0.11 * (1.0 - agent.metrics.load)))
+            step = dt * (0.10 + 0.11 * (1.0 - agent.metrics.load))
+            if task.api_started and not task.api_completed:
+                # A real model call owns this task: ease toward a holding point and let
+                # the actual response (not synthetic motion) mark it complete.
+                task.mark_progress(min(_API_PROGRESS_CEILING, task.progress + step * 0.6))
+            else:
+                task.mark_progress(task.progress + step)
             agent.action = AgentAction.PROCESSING_TASK if task.progress < 0.86 else AgentAction.REPORTING
             agent.status = AgentStatus.WORKING
             if task.status is TaskStatus.COMPLETE:
@@ -185,6 +286,15 @@ class SimulationState:
 
     def _task_station(self, index: int) -> Position:
         return Position(130 + index * 145, WORLD_HEIGHT - 92)
+
+    def _prune_finished(self) -> None:
+        finished = sorted(
+            (task for task in self.tasks.values() if task.is_finished),
+            key=lambda task: task.updated_at,
+        )
+        overflow = len(finished) - self.max_finished_tasks
+        for task in finished[:max(0, overflow)]:
+            self.tasks.pop(task.id, None)
 
     def _record(
         self,

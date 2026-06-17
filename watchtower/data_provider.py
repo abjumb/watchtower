@@ -143,6 +143,9 @@ class TelemetryPoller:
     def configure(self, auth_config: AuthConfig) -> None:
         self._provider.configure(auth_config)
 
+    def set_profiles(self, profiles: Sequence[AgentProfile]) -> None:
+        self._profiles = list(profiles)
+
     def latest(self) -> ProviderSnapshot:
         with self._lock:
             return self._snapshot
