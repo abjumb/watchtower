@@ -14,7 +14,10 @@ python -m venv .venv
 
 ## Controls
 
-- Type a task and press Enter or click Submit to add it to the left-side todo list.
+- Type a task and press Enter or click Submit to add it to the left-side todo list. The prompt field
+  is a real text input with a caret (click to focus, arrow keys move the caret).
+- Use the bottom **toolbar** — a **Menu** dropdown plus Compare / Clear / Theme / Settings buttons.
+  **Settings** opens a dialog with theme and auto-save toggles and an **Add agent** form.
 - Drag a todo card onto an agent in the world to assign it.
 - Click a model in the side panel, or press Ctrl/Alt/Meta + 1-5, to route new tasks to that model.
 - Click an agent in the world to open its **inspect overlay** (full metrics, current task, recent activity, and a "Route here" button).

@@ -311,6 +311,113 @@ def test_comparison_overlay_paginates_large_group() -> None:
         assert app.compare_scroll < len(app.simulation.agents)
 
 
+def test_typing_keydown_updates_input_text() -> None:
+    with make_app() as app:
+        for char in "hi there":
+            app._handle_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_a, unicode=char, mod=0))
+        assert app.input_text == "hi there"
+
+
+def test_menu_dropdown_opens_and_selects_settings() -> None:
+    with make_app() as app:
+        _render_frame(app)
+        app._handle_mouse_down(app.menu.rect.center)
+        assert app.menu.open
+        labels = [label for label, _ in app.menu.items]
+        idx = labels.index("Settings...")
+        app._handle_mouse_down(app.menu.item_rects()[idx].center)
+        assert app.show_settings
+
+
+def test_toolbar_settings_button_opens_dialog() -> None:
+    with make_app() as app:
+        _render_frame(app)
+        button = next(b for b in app._toolbar_buttons() if b.label == "Settings")
+        app._handle_mouse_down(button.rect.center)
+        assert app.show_settings
+
+
+def test_settings_toggle_switches_theme() -> None:
+    with make_app() as app:
+        app._open_settings()
+        _render_frame(app)
+        toggles, _ = app._settings_widgets()
+        app._settings_click(toggles[0].rect.center)  # "Light theme"
+        assert app.theme is LIGHT_THEME
+
+
+def test_clicking_outside_settings_closes_it() -> None:
+    with make_app() as app:
+        app._open_settings()
+        app._handle_mouse_down((2, 2))
+        assert not app.show_settings
+
+
+def test_add_agent_dialog_creates_agent() -> None:
+    with make_app() as app:
+        app._open_add_agent()
+        app.add_agent_inputs["id"].set("qwen")
+        app.add_agent_inputs["provider"].set("local")
+        app.add_agent_inputs["model"].set("qwen2")
+        app.add_agent_inputs["name"].set("Qwen Coder")
+        app._create_agent_from_dialog()
+        assert "qwen" in app.simulation.agents
+        assert not app.show_add_agent
+        assert any(p.id == "qwen" for p in app.poller._profiles)
+
+
+def test_toolbar_compare_honours_priority_prefix() -> None:
+    from watchtower.models import TaskPriority
+
+    with make_app() as app:
+        app.input_text = "!high brainstorm names"
+        app._toolbar_compare()
+        tasks = list(app.simulation.tasks.values())
+        assert tasks, "compare should have created tasks"
+        assert all(t.priority is TaskPriority.HIGH for t in tasks)
+        assert all(t.prompt == "brainstorm names" for t in tasks)
+        assert app.input_text == ""
+
+
+def test_toolbar_compare_strips_target_prefix() -> None:
+    with make_app() as app:
+        app.input_text = "@gpt brainstorm names"
+        app._toolbar_compare()
+        tasks = list(app.simulation.tasks.values())
+        assert len(tasks) == len(app.simulation.agents)
+        # The @gpt target is stripped, not sent as literal prompt text.
+        assert all(t.prompt == "brainstorm names" for t in tasks)
+
+
+def test_add_agent_rejects_blank_model_for_real_provider() -> None:
+    with make_app() as app:
+        assert app._add_agent("ghost", "openai", "", "Ghost") is False
+        assert "ghost" not in app.simulation.agents
+        # local agents may omit a model (they fall back to a stub).
+        assert app._add_agent("edge", "local", "", "Edge") is True
+        assert "edge" in app.simulation.agents
+
+
+def test_open_menu_click_through_acts_on_target() -> None:
+    with make_app() as app:
+        _render_frame(app)
+        app.menu.open = True
+        # A single click on a toolbar button should close the menu AND act.
+        button = next(b for b in app._toolbar_buttons() if b.label == "Settings")
+        app._handle_mouse_down(button.rect.center)
+        assert not app.menu.open
+        assert app.show_settings
+
+
+def test_add_agent_dialog_tab_cycles_focus() -> None:
+    with make_app() as app:
+        app._open_add_agent()
+        assert app.add_agent_inputs["id"].focused
+        app._handle_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_TAB, unicode="\t", mod=0))
+        assert app.add_agent_inputs["provider"].focused
+        assert not app.add_agent_inputs["id"].focused
+
+
 def test_autosave_round_trips_via_patched_path(tmp_path, monkeypatch) -> None:
     import watchtower.ui as ui_module
 
