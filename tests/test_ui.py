@@ -232,6 +232,85 @@ def test_metric_history_samples_over_time() -> None:
         assert set(app.metric_history) == set(app.simulation.agents)
 
 
+def test_removing_agent_requeues_inflight_task_and_ignores_stale_result() -> None:
+    from watchtower.model_api import ModelCallResult
+
+    with make_app() as app:
+        task = app.simulation.submit_task("work", requested_agent_id="gpt")
+        app.simulation.update(0.1)  # assign to gpt
+        # mimic a dispatched model call
+        task.api_started = True
+        app.running_model_tasks.add(task.id)
+        app._dispatch_seq += 1
+        old_token = app._dispatch_seq
+        app._dispatch_token[task.id] = old_token
+
+        requeued = app.simulation.remove_agent("gpt")
+        app._invalidate_dispatches(requeued)
+
+        assert task.id in requeued
+        assert task.status is TaskStatus.SUBMITTED
+        assert task.api_started is False
+        assert task.id not in app.running_model_tasks
+        assert task.id not in app._dispatch_token
+
+        # the requeued task gets a new home instead of being skipped forever
+        app.simulation.update(0.1)
+        assert task.assigned_agent_id in app.simulation.agents
+
+        # a late result from the removed agent's dispatch must be ignored
+        app.model_results.put(("done", task.id, old_token, ModelCallResult("gpt", "stale", 1.0)))
+        app._drain_model_results()
+        assert task.model_response == ""
+        assert task.status is not TaskStatus.COMPLETE
+
+
+def test_matching_dispatch_result_completes_task() -> None:
+    from watchtower.model_api import ModelCallResult
+
+    with make_app() as app:
+        task = app.simulation.submit_task("work", requested_agent_id="gpt")
+        app.simulation.update(0.1)
+        app._dispatch_seq += 1
+        token = app._dispatch_seq
+        app._dispatch_token[task.id] = token
+        app.running_model_tasks.add(task.id)
+        app.model_results.put(("done", task.id, token, ModelCallResult("gpt", "real answer", 5.0, total_tokens=12)))
+        app._drain_model_results()
+        assert task.status is TaskStatus.COMPLETE
+        assert task.model_response == "real answer"
+        assert task.actual_tokens == 12
+        assert task.id not in app._dispatch_token
+
+
+def test_arrow_keys_do_not_move_cursor_while_typing() -> None:
+    with make_app() as app:
+        app.simulation.create_todo_task("one")
+        app.simulation.create_todo_task("two")
+        app.input_text = "drafting a prompt"
+        before = app.task_cursor
+        app._handle_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_DOWN, mod=0, unicode=""))
+        assert app.task_cursor == before  # gated while input has text
+        app.input_text = ""
+        app._handle_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_DOWN, mod=0, unicode=""))
+        assert app.task_cursor == before + 1
+
+
+def test_comparison_overlay_paginates_large_group() -> None:
+    with make_app() as app:
+        for i in range(8):  # grow the roster well past one screen of cards
+            from watchtower.models import AgentProfile
+
+            app.simulation.add_agent(AgentProfile(f"x{i}", f"X{i}", f"X{i} model", provider="local"))
+        tasks = app.simulation.submit_comparison("compare everyone")
+        app.compare_group_id = tasks[0].group_id
+        _render_frame(app)  # must not raise even with many cards
+        assert app.compare_scroll == 0
+        app.compare_scroll = 999
+        _render_frame(app)  # draw clamps an out-of-range scroll
+        assert app.compare_scroll < len(app.simulation.agents)
+
+
 def test_autosave_round_trips_via_patched_path(tmp_path, monkeypatch) -> None:
     import watchtower.ui as ui_module
 

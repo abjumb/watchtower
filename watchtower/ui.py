@@ -116,8 +116,10 @@ class WatchtowerApp:
         self.provider = AgentDataProvider(self.auth_config)
         self.poller = TelemetryPoller(self.provider, self.simulation.profiles)
         self.model_api = ModelApiClient()
-        self.model_results: queue.Queue[tuple[str, str, object]] = queue.Queue()
+        self.model_results: queue.Queue[tuple[str, str, int, object]] = queue.Queue()
         self.running_model_tasks: set[str] = set()
+        self._dispatch_token: dict[str, int] = {}
+        self._dispatch_seq = 0
         self.input_text = ""
         self.flash_message = "Ready - F1 help, F2 theme"
         self.selected_agent_id: str | None = None
@@ -128,6 +130,7 @@ class WatchtowerApp:
         self.dragging_task_id: str | None = None
         self.task_scroll = 0
         self.task_cursor = 0
+        self.compare_scroll = 0
         self.effects: list[list[float]] = []
         self.metric_history: dict[str, deque[float]] = {}
         self._spark_timer = 0.0
@@ -170,7 +173,10 @@ class WatchtowerApp:
             elif event.type == pygame.VIDEORESIZE:
                 self._resize(event.w, event.h)
             elif event.type == pygame.MOUSEWHEEL:
-                self.task_scroll = max(0, self.task_scroll - event.y)
+                if self.compare_group_id:
+                    self.compare_scroll = max(0, self.compare_scroll - event.y)
+                else:
+                    self.task_scroll = max(0, self.task_scroll - event.y)
             elif event.type == pygame.KEYDOWN:
                 self._handle_keydown(event)
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -186,9 +192,9 @@ class WatchtowerApp:
             self.show_help = not self.show_help
         elif event.key == pygame.K_F2:
             self._toggle_theme()
-        elif event.key == pygame.K_DOWN:
+        elif event.key == pygame.K_DOWN and not self.input_text:
             self._move_task_cursor(1)
-        elif event.key == pygame.K_UP:
+        elif event.key == pygame.K_UP and not self.input_text:
             self._move_task_cursor(-1)
         elif event.key == pygame.K_RETURN:
             self._handle_return()
@@ -408,12 +414,12 @@ class WatchtowerApp:
 
     def _cancel_task(self, task_id: str) -> None:
         self.simulation.cancel_task(task_id)
-        self.running_model_tasks.discard(task_id)
+        self._invalidate_dispatch(task_id)
         self.flash_message = f"Cancelled {task_id}"
 
     def _retry_task(self, task_id: str) -> None:
         self.simulation.retry_task(task_id)
-        self.running_model_tasks.discard(task_id)
+        self._invalidate_dispatch(task_id)
         self.flash_message = f"Retrying {task_id}"
 
     def _handle_key_command(self, arg: str) -> None:
@@ -434,7 +440,7 @@ class WatchtowerApp:
             if agent_id not in self.simulation.agents:
                 self.flash_message = f"No agent {agent_id}"
                 return
-            self.simulation.remove_agent(agent_id)
+            self._invalidate_dispatches(self.simulation.remove_agent(agent_id))
             self.poller.set_profiles(self.simulation.profiles)
             if self.selected_agent_id == agent_id:
                 self.selected_agent_id = None
@@ -487,6 +493,7 @@ class WatchtowerApp:
         self.selected_agent_id = None
         self.selected_task_id = None
         self.running_model_tasks.clear()
+        self._dispatch_token.clear()
         self._completed_seen = {t.id for t in tasks if t.status is TaskStatus.COMPLETE}
         self.flash_message = f"Loaded {len(tasks)} tasks"
 
@@ -557,39 +564,55 @@ class WatchtowerApp:
                 continue
             task.api_started = True
             self.running_model_tasks.add(task.id)
+            self._dispatch_seq += 1
+            token = self._dispatch_seq
+            self._dispatch_token[task.id] = token
             thread = threading.Thread(
                 target=self._run_model_task,
-                args=(task.id, agent.profile, task.prompt),
+                args=(task.id, agent.profile, task.prompt, token),
                 name=f"watchtower-model-{task.id}",
                 daemon=True,
             )
             thread.start()
 
-    def _run_model_task(self, task_id: str, profile: AgentProfile, prompt: str) -> None:
+    def _run_model_task(self, task_id: str, profile: AgentProfile, prompt: str, token: int) -> None:
         def on_delta(delta: str) -> None:
-            self.model_results.put(("delta", task_id, delta))
+            self.model_results.put(("delta", task_id, token, delta))
 
         try:
             result = asyncio.run(self.model_api.run_task(profile, prompt, on_delta=on_delta))
-            self.model_results.put(("done", task_id, result))
+            self.model_results.put(("done", task_id, token, result))
         except Exception as exc:
-            self.model_results.put(("error", task_id, f"{type(exc).__name__}: {exc}"))
+            self.model_results.put(("error", task_id, token, f"{type(exc).__name__}: {exc}"))
+
+    def _invalidate_dispatch(self, task_id: str) -> None:
+        """Forget any in-flight model call for a task so a late result is ignored."""
+        self.running_model_tasks.discard(task_id)
+        self._dispatch_token.pop(task_id, None)
+
+    def _invalidate_dispatches(self, task_ids: list[str]) -> None:
+        for task_id in task_ids:
+            self._invalidate_dispatch(task_id)
 
     def _drain_model_results(self) -> None:
         while True:
             try:
-                kind, task_id, payload = self.model_results.get_nowait()
+                kind, task_id, token, payload = self.model_results.get_nowait()
             except queue.Empty:
                 return
+            is_current = self._dispatch_token.get(task_id) == token
             task = self.simulation.tasks.get(task_id)
-            if task is None:
-                if kind in {"done", "error"}:
-                    self.running_model_tasks.discard(task_id)
-                continue
             if kind == "delta":
-                task.append_partial(str(payload))
+                if task is not None and is_current:
+                    task.append_partial(str(payload))
                 continue
-            self.running_model_tasks.discard(task_id)
+            # A "done"/"error" means this dispatch's thread finished. Ignore it if a
+            # newer dispatch superseded it (agent removed, task retried/cancelled).
+            if not is_current:
+                continue
+            self._invalidate_dispatch(task_id)
+            if task is None:
+                continue
             agent_id = task.assigned_agent_id
             if kind == "error":
                 task.mark_model_error(str(payload)[:180])
@@ -597,8 +620,9 @@ class WatchtowerApp:
             else:
                 result = payload
                 assert isinstance(result, ModelCallResult)
-                tokens = result.total_tokens or _estimate_tokens(task.prompt, result.text)
-                task.mark_model_result(result.text[:4000], latency_ms=result.latency_ms, tokens=tokens)
+                text = result.text[:4000]
+                tokens = result.total_tokens or _estimate_tokens(task.prompt, text)
+                task.mark_model_result(text, latency_ms=result.latency_ms, tokens=tokens)
                 self.flash_message = f"{task.id} completed by {self._agent_label(agent_id)}"
             if agent_id and agent_id in self.simulation.agents:
                 self.simulation.agents[agent_id].current_task_id = None
@@ -939,14 +963,23 @@ class WatchtowerApp:
         if not tasks:
             self._text("No tasks in this comparison", rect.x + 18, rect.y + 60, self.font, theme.muted)
             return
+        # Fixed card size + paging so a large group never spills past the modal.
         cols = 2 if len(tasks) > 1 else 1
-        rows = (len(tasks) + cols - 1) // cols
-        col_w = (rect.width - 36 - (cols - 1) * 12) // cols
-        col_h = max(90, (rect.height - 84 - (rows - 1) * 12) // rows)
-        for index, task in enumerate(tasks):
-            cx = rect.x + 18 + (index % cols) * (col_w + 12)
-            cy = rect.y + 56 + (index // cols) * (col_h + 12)
-            card = pygame.Rect(cx, cy, col_w, col_h)
+        gap = 12
+        card_h = 130
+        area_top = rect.y + 56
+        area_bottom = rect.bottom - 28
+        rows_visible = max(1, (area_bottom - area_top + gap) // (card_h + gap))
+        per_page = rows_visible * cols
+        total_rows = (len(tasks) + cols - 1) // cols
+        max_scroll = max(0, total_rows - rows_visible)
+        self.compare_scroll = min(self.compare_scroll, max_scroll)
+        start = self.compare_scroll * cols
+        col_w = (rect.width - 36 - (cols - 1) * gap) // cols
+        for offset, task in enumerate(tasks[start:start + per_page]):
+            cx = rect.x + 18 + (offset % cols) * (col_w + gap)
+            cy = area_top + (offset // cols) * (card_h + gap)
+            card = pygame.Rect(cx, cy, col_w, card_h)
             pygame.draw.rect(self.screen, theme.surface_alt, card, border_radius=8)
             agent = self.simulation.agents.get(task.assigned_agent_id or task.requested_agent_id or "")
             color = _hex_to_rgb(agent.profile.accent_color, theme.accent) if agent else theme.accent
@@ -958,6 +991,9 @@ class WatchtowerApp:
             for line in self._wrap(body, self.small_font, col_w - 20)[:max_lines]:
                 self._text(line, cx + 10, ty, self.small_font, theme.text)
                 ty += 16
+        if max_scroll:
+            footer = f"{len(tasks)} agents - scroll for more ({self.compare_scroll + 1}/{max_scroll + 1})"
+            self._text(footer, rect.x + 18, rect.bottom - 22, self.small_font, theme.muted)
 
     def _handle_compare_click(self, pos: tuple[int, int]) -> None:
         rect = self._compare_rect()
@@ -1036,7 +1072,7 @@ class WatchtowerApp:
                 self.flash_message = f"Routing to {self._agent_label(agent_id)}"
                 self.inspect_agent_id = None
             elif name == "Remove" and agent_id:
-                self.simulation.remove_agent(agent_id)
+                self._invalidate_dispatches(self.simulation.remove_agent(agent_id))
                 self.poller.set_profiles(self.simulation.profiles)
                 if self.selected_agent_id == agent_id:
                     self.selected_agent_id = None
@@ -1090,13 +1126,14 @@ class WatchtowerApp:
             self._retry_task(task.id)
         elif name == "Delete":
             self.simulation.remove_task(task.id)
-            self.running_model_tasks.discard(task.id)
+            self._invalidate_dispatch(task.id)
             self.selected_task_id = None
         elif name == "Export":
             saved = export_task_text(f"{task.id}.md", task)
             self.flash_message = f"Exported {saved.name}"
         elif name == "Group":
             self.compare_group_id = task.group_id
+            self.compare_scroll = 0
             self.selected_task_id = None
 
     def _station_at(self, pos: tuple[int, int]) -> str | None:

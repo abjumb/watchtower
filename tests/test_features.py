@@ -171,6 +171,16 @@ def test_total_tokens_handles_provider_usage_shapes() -> None:
     assert _total_tokens({"nothing": True}) == 0
 
 
+def test_total_tokens_tolerates_malformed_usage() -> None:
+    # null / non-numeric usage values must not raise (would turn a good response into an error)
+    assert _total_tokens({"usage": {"total_tokens": None}}) == 0
+    assert _total_tokens({"usage": {"total_tokens": "unknown"}}) == 0
+    assert _total_tokens({"usage": {"prompt_tokens": "x", "completion_tokens": None}}) == 0
+    assert _total_tokens({"usage": "nope"}) == 0
+    assert _total_tokens({"usageMetadata": {"totalTokenCount": "n/a"}}) == 0
+    assert _total_tokens(None) == 0
+
+
 def test_local_provider_key_detection_and_runtime_set() -> None:
     config = ModelApiConfig()
     assert not config.has_key("local")

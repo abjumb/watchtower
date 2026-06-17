@@ -228,21 +228,30 @@ def _extract_text(value: object) -> str:
     return "\n".join(texts)
 
 
+def _as_int(value: object) -> int:
+    """Coerce a provider usage field to int, tolerating null/strings/junk."""
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
 def _total_tokens(data: object) -> int:
     """Pull a total token count out of the differently-named provider usage blocks."""
     if not isinstance(data, dict):
         return 0
     usage = data.get("usage")
     if isinstance(usage, dict):
-        if usage.get("total_tokens"):
-            return int(usage["total_tokens"])
-        inp = usage.get("input_tokens") or usage.get("prompt_tokens") or 0
-        out = usage.get("output_tokens") or usage.get("completion_tokens") or 0
-        if inp or out:
-            return int(inp) + int(out)
+        total = _as_int(usage.get("total_tokens"))
+        if total:
+            return total
+        prompt = _as_int(usage.get("input_tokens")) or _as_int(usage.get("prompt_tokens"))
+        completion = _as_int(usage.get("output_tokens")) or _as_int(usage.get("completion_tokens"))
+        if prompt or completion:
+            return prompt + completion
     meta = data.get("usageMetadata")
-    if isinstance(meta, dict) and meta.get("totalTokenCount"):
-        return int(meta["totalTokenCount"])
+    if isinstance(meta, dict):
+        return _as_int(meta.get("totalTokenCount"))
     return 0
 
 
