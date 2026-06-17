@@ -1,0 +1,73 @@
+name: Build executables
+
+# Builds standalone Watchtower executables for Windows, macOS and Linux with
+# PyInstaller. Triggered automatically when a version tag (v*) is pushed — the
+# binaries are then attached to that tag's GitHub Release. Can also be run
+# manually (workflow_dispatch) to download the binaries as workflow artifacts
+# without cutting a release.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            windowed: "--noconsole"
+            asset: Watchtower-Windows.exe
+            package: cp dist/Watchtower.exe Watchtower-Windows.exe
+          - os: macos-latest
+            windowed: "--windowed"
+            asset: Watchtower-macOS.zip
+            package: ditto -c -k --keepParent dist/Watchtower.app Watchtower-macOS.zip
+          - os: ubuntu-latest
+            windowed: ""
+            asset: Watchtower-Linux
+            package: cp dist/Watchtower Watchtower-Linux
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller pygame httpx
+
+      - name: Build executable
+        run: |
+          pyinstaller --onefile ${{ matrix.windowed }} --name Watchtower --noconfirm \
+            --exclude-module ipykernel --exclude-module IPython --exclude-module tkinter \
+            watchtower/__main__.py
+
+      - name: Package artifact
+        run: ${{ matrix.package }}
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset }}
+          generate_release_notes: true
