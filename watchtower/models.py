@@ -48,6 +48,11 @@ class TaskPriority(str, Enum):
     HIGH = "high"
     CRITICAL = "critical"
 
+    @property
+    def rank(self) -> int:
+        """Lower sorts first when scheduling waiting tasks."""
+        return {"critical": 0, "high": 1, "normal": 2, "low": 3}[self.value]
+
 
 @dataclass(slots=True)
 class Position:
@@ -111,11 +116,22 @@ class SubmittedTask:
     progress: float = 0.0
     estimated_tokens: int = 1_000
     model_response: str = ""
+    model_partial: str = ""
     model_error: str = ""
+    model_latency_ms: float = 0.0
     api_started: bool = False
     api_completed: bool = False
+    group_id: str | None = None
     created_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
+
+    @property
+    def is_active(self) -> bool:
+        return self.status in {TaskStatus.ASSIGNED, TaskStatus.IN_PROGRESS}
+
+    @property
+    def is_finished(self) -> bool:
+        return self.status in {TaskStatus.COMPLETE, TaskStatus.FAILED, TaskStatus.CANCELLED}
 
     def assign_to(self, agent_id: str) -> None:
         self.assigned_agent_id = agent_id
@@ -131,8 +147,17 @@ class SubmittedTask:
         self.status = TaskStatus.TODO
         self.updated_at = utcnow()
 
-    def mark_model_result(self, response: str) -> None:
+    def append_partial(self, delta: str) -> None:
+        """Accumulate a streamed token delta while the model call is in flight."""
+        if not delta:
+            return
+        self.model_partial += delta
+        self.status = TaskStatus.IN_PROGRESS
+        self.updated_at = utcnow()
+
+    def mark_model_result(self, response: str, latency_ms: float = 0.0) -> None:
         self.model_response = response
+        self.model_latency_ms = latency_ms
         self.api_completed = True
         self.progress = 1.0
         self.status = TaskStatus.COMPLETE
@@ -142,6 +167,23 @@ class SubmittedTask:
         self.model_error = error
         self.api_completed = True
         self.status = TaskStatus.FAILED
+        self.updated_at = utcnow()
+
+    def cancel(self) -> None:
+        self.status = TaskStatus.CANCELLED
+        self.updated_at = utcnow()
+
+    def reset_for_retry(self) -> None:
+        """Return a finished task to the routing queue for another attempt."""
+        self.status = TaskStatus.SUBMITTED
+        self.assigned_agent_id = None
+        self.progress = 0.0
+        self.model_response = ""
+        self.model_partial = ""
+        self.model_error = ""
+        self.model_latency_ms = 0.0
+        self.api_started = False
+        self.api_completed = False
         self.updated_at = utcnow()
 
 

@@ -52,30 +52,48 @@ threads → snapshot/queue → `SimulationState.update()` → draw.
   `AgentMetrics`. `utcnow()` and `clamp()` live here.
 - **`simulation.py`** — `SimulationState` is the authoritative game model. It owns
   agents and tasks, runs the per-frame `update(dt, telemetry)` that assigns
-  waiting tasks, advances agent motion (`_move_toward`, orbit/patrol math), and
-  drives task progress. `default_profiles()` defines the five built-in agents and
-  their provider/model mappings. `WORLD_WIDTH`/`WORLD_HEIGHT` are the simulation
-  coordinate space (not screen pixels). `snapshot()` returns an immutable view for
-  rendering.
+  waiting tasks (priority-ordered), advances agent motion (`_move_toward`,
+  orbit/patrol math), and drives task progress. Roster is mutable at runtime via
+  `add_agent`/`remove_agent`; tasks can be cancelled/retried/removed
+  (`cancel_task`/`retry_task`/`remove_task`/`clear_finished`) and finished tasks are
+  capped by `max_finished_tasks` (`_prune_finished`). `submit_comparison` fans one
+  prompt to every agent (shared `group_id`). When `task.api_started` and not
+  `api_completed`, synthetic progress holds at `_API_PROGRESS_CEILING` so the real
+  model result is what completes the task. `default_profiles()` defines the five
+  built-in agents and their provider/model mappings. `WORLD_WIDTH`/`WORLD_HEIGHT`
+  are the simulation coordinate space (not screen pixels). `snapshot()` returns an
+  immutable view for rendering.
 - **`data_provider.py`** — Telemetry ingestion. `AgentDataProvider.fetch_all()` is
   async (httpx) and either hits `GET /agents/{id}/telemetry` on the configured
   endpoint or returns deterministic `_demo_telemetry` (sine-wave fake metrics).
   `TelemetryPoller` runs this on a daemon thread every ~2s and exposes the latest
   `ProviderSnapshot` behind a lock via `latest()`. Remote failures degrade
   gracefully to demo data rather than crashing.
-- **`model_api.py`** — Real LLM calls. `ModelApiClient.run_task(profile, prompt)`
-  dispatches on `profile.provider` to OpenAI Responses, Anthropic Messages, or
-  Gemini generateContent endpoints (raw httpx, no SDKs). `local` providers
-  (Llama/Mistral) return a stub string. `_extract_text` recursively flattens the
-  differently-shaped provider response payloads. Keys come from
-  `OPENAI_API_KEY`/`ANTHROPIC_API_KEY`/`GEMINI_API_KEY`.
+- **`model_api.py`** — Real LLM calls. `ModelApiClient.run_task(profile, prompt, on_delta=None)`
+  dispatches on `profile.provider` to OpenAI Responses, Anthropic Messages, Gemini
+  generateContent, or an OpenAI-compatible `local` endpoint (raw httpx, no SDKs).
+  When `on_delta` is supplied it streams via SSE and emits token deltas, falling
+  back to a blocking call if streaming fails before any delta (`_StreamUnavailable`);
+  the per-provider delta extractors (`_openai_responses_delta`, `_anthropic_delta`,
+  `_gemini_delta`, `_openai_chat_delta`) are pure and unit-tested. A `local` provider
+  with no configured base URL still returns a stub string. `_extract_text` recursively
+  flattens the differently-shaped provider response payloads. Keys come from
+  `OPENAI_API_KEY`/`ANTHROPIC_API_KEY`/`GEMINI_API_KEY`/`WATCHTOWER_LOCAL_BASE_URL`
+  and can be set at runtime via `ModelApiConfig.set_key`.
+- **`persistence.py`** — Pure JSON (de)serialization. `save_session`/`load_session`
+  round-trip profiles + tasks; `export_task_text` writes one task's prompt/response
+  to Markdown. No pygame, no network.
 - **`auth.py`** — `AuthConfig` for the *telemetry* endpoint (separate from model
   API keys). Supports OAuth bearer, basic login, or demo mode; `mode` and
   `is_remote_enabled` decide whether the provider goes remote.
 - **`ui.py`** — `WatchtowerApp` owns the pygame window, event loop, all drawing,
   and the wiring between the above. This is the only module that mounts the parts
-  together. Layout constants (`LEFT_PANEL_WIDTH`, `WORLD_X`, `PANEL_X`,
-  `SCREEN_*`) and the color palette live at the top.
+  together. Colors are semantic tokens on a `Theme` (`DARK_THEME`/`LIGHT_THEME`,
+  toggled with `F2`/`/theme`) — draw code reads `self.theme.<token>` rather than raw
+  constants. Layout constants (`LEFT_PANEL_WIDTH`, `WORLD_X`, `PANEL_X`) live at the
+  top; the window is resizable and `self.screen_width`/`self.screen_height` track the
+  current size (clamped to `MIN_WIDTH`/`MIN_HEIGHT`). Overlays (`_draw_detail`,
+  `_draw_help`) and completion effects render on top of the base scene.
 - **`app.py` / `__main__.py`** — Thin entrypoints; `main()` just runs
   `WatchtowerApp().run()`.
 
@@ -86,25 +104,38 @@ state across threads directly:
 - Telemetry: the poller thread writes a `ProviderSnapshot`; the loop reads it via
   `poller.latest()` and passes `.telemetry` into `simulation.update()`.
 - Model calls: `_start_ready_model_calls()` spawns a daemon thread per task that
-  runs `model_api.run_task` (via `asyncio.run`) and pushes the result onto a
-  `queue.Queue`. `_drain_model_results()` consumes that queue on the main thread
-  and applies it to the simulation. `task.api_started` + `running_model_tasks`
-  guard against double-dispatch.
+  runs `model_api.run_task` (via `asyncio.run`) with an `on_delta` callback. Streamed
+  deltas and the final result/error are pushed onto a `queue.Queue` as tagged tuples
+  (`"delta"`/`"done"`/`"error"`, task_id, payload). `_drain_model_results()` consumes
+  that queue on the main thread and applies it to the simulation. `task.api_started` +
+  `running_model_tasks` guard against double-dispatch.
 
-Only agents whose provider has a live API key get real model calls; everyone else
-animates with locally-simulated progress in `_advance_agent`.
+Only agents whose provider has a live API key (or a configured `local` base URL) get
+real model calls; everyone else animates with locally-simulated progress in
+`_advance_agent`.
 
 ### Task lifecycle
 
 `TODO` (in left panel, must be dragged onto an agent) → `SUBMITTED` (queued for
-routing) → `ASSIGNED` → `IN_PROGRESS` → `COMPLETE`/`FAILED`. Routing in
-`_assign_waiting_tasks`/`_candidate_agents`: a `requested_agent_id` pins the task
-to one agent (and waits if it's busy); otherwise the least-loaded free agent wins.
+routing) → `ASSIGNED` → `IN_PROGRESS` → `COMPLETE`/`FAILED`; `cancel_task` moves a
+task to `CANCELLED`, and `retry_task` returns a finished task to `SUBMITTED`. Routing
+in `_assign_waiting_tasks`/`_candidate_agents` processes waiting tasks by
+`(priority.rank, created_at)`: a `requested_agent_id` pins the task to one agent (and
+waits if it's busy); otherwise the least-loaded free agent wins.
 
-### Input commands (parsed in `ui.py:_submit_input`)
+### Input commands (parsed in `ui.py:_submit_input` / `_handle_command`)
 
-- `@<agent> <prompt>` — one-off target a specific agent.
+- `@<agent> <prompt>` — one-off target a specific agent; `@all <prompt>` / `/compare`
+  fans the prompt to every agent.
+- `!<priority> <prompt>` — `low`/`normal`/`high`/`critical` (default normal).
 - `/auto` — clear selection, return to load-based routing.
+- `/theme [dark|light]` (or `F2`), `F1` help overlay.
+- `/cancel <id>`, `/retry <id>`, `/clear` — task lifecycle controls (also via the
+  detail overlay buttons).
+- `/save [path]`, `/load [path]`, `/export <id> [path]` — persistence (`persistence.py`).
+- `/key <provider> <value>` — set a model API key/base URL at runtime.
+- `/agent add <id> <provider> <model> [Name]`, `/agent remove <id>` — edit the roster
+  (also calls `poller.set_profiles`).
 - `/endpoint <url>`, `/auth token <tok>`, `/auth login <user> <pass>` — reconfigure
   the telemetry feed at runtime; these rebuild `AuthConfig` and call
   `poller.configure()`.
