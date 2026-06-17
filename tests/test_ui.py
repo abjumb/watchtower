@@ -1,6 +1,7 @@
 import os
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+os.environ.setdefault("WATCHTOWER_NO_AUTOSAVE", "1")
 
 import contextlib
 
@@ -169,3 +170,78 @@ def test_resize_clamps_to_minimum_and_moves_submit_button() -> None:
         app._resize(1600, 900)
         assert app.screen_width == 1600
         assert app._submit_rect().x == 1600 - 120
+
+
+def test_compare_overlay_opens_from_detail_and_renders() -> None:
+    with make_app() as app:
+        tasks = app.simulation.submit_comparison("which is best?")
+        group_id = tasks[0].group_id
+        app.selected_task_id = tasks[0].id
+        app._detail_action("Group", tasks[0])
+        assert app.compare_group_id == group_id
+        assert app.selected_task_id is None
+        grouped = app._group_tasks(group_id)
+        assert len(grouped) == len(app.simulation.agents)
+        _render_frame(app)  # compare overlay draws without error
+        # clicking outside the overlay closes it
+        app._handle_mouse_down((2, 2))
+        assert app.compare_group_id is None
+
+
+def test_clicking_world_agent_opens_inspect_overlay() -> None:
+    with make_app() as app:
+        agent = app.simulation.agents["gpt"]
+        app._handle_mouse_down(app._agent_screen_position(agent))
+        assert app.inspect_agent_id == "gpt"
+        _render_frame(app)
+        rect = app._inspect_rect()
+        route_rect = app._inspect_button_rects(rect)["Route here"]
+        app._handle_mouse_down(route_rect.center)
+        assert app.selected_agent_id == "gpt"
+        assert app.inspect_agent_id is None
+
+
+def test_inspect_overlay_remove_button_drops_agent() -> None:
+    with make_app() as app:
+        app.inspect_agent_id = "mistral"
+        _render_frame(app)
+        rect = app._inspect_rect()
+        remove_rect = app._inspect_button_rects(rect)["Remove"]
+        app._handle_mouse_down(remove_rect.center)
+        assert "mistral" not in app.simulation.agents
+        assert all(p.id != "mistral" for p in app.poller._profiles)
+
+
+def test_keyboard_navigation_opens_focused_task() -> None:
+    with make_app() as app:
+        app.simulation.create_todo_task("first")
+        app.simulation.create_todo_task("second")
+        app._move_task_cursor(1)
+        assert app.task_cursor == 1
+        app.input_text = ""
+        app._handle_return()  # empty input -> open focused task
+        tasks = app.simulation.snapshot().tasks
+        assert app.selected_task_id == tasks[1].id
+
+
+def test_metric_history_samples_over_time() -> None:
+    with make_app() as app:
+        app._sample_metrics(1.0)  # well past SPARK_INTERVAL
+        app._sample_metrics(1.0)
+        assert all(len(hist) >= 1 for hist in app.metric_history.values())
+        assert set(app.metric_history) == set(app.simulation.agents)
+
+
+def test_autosave_round_trips_via_patched_path(tmp_path, monkeypatch) -> None:
+    import watchtower.ui as ui_module
+
+    monkeypatch.setattr(ui_module, "AUTOSAVE_PATH", tmp_path / "autosave.json")
+    monkeypatch.delenv("WATCHTOWER_NO_AUTOSAVE", raising=False)
+    with make_app() as app:
+        app.simulation.submit_task("persist me", requested_agent_id="gpt")
+        app._autosave()
+        assert (tmp_path / "autosave.json").exists()
+
+    # a fresh app should restore the autosaved task
+    with make_app() as app2:
+        assert any(task.prompt == "persist me" for task in app2.simulation.tasks.values())

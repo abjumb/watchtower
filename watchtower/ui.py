@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 import queue
 import threading
+from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 
 import pygame
 
@@ -36,6 +39,14 @@ MIN_HEIGHT = SCREEN_HEIGHT
 AGENT_COLORS = ["#44b37f", "#d97842", "#4d8df7", "#9b72f2", "#e0b84f", "#5fd0c4", "#e76f9a"]
 
 DEFAULT_SAVE_PATH = "watchtower_session.json"
+AUTOSAVE_PATH = Path.home() / ".watchtower" / "autosave.json"
+AUTOSAVE_INTERVAL = 20.0
+SPARK_INTERVAL = 0.25
+SPARK_SAMPLES = 40
+
+# Rough $/1k-token estimates for a token/cost readout. Deliberately coarse and
+# clearly labelled "est." in the UI; not meant to be billing-accurate.
+PRICE_PER_1K = {"openai": 0.005, "anthropic": 0.006, "gemini": 0.001, "local": 0.0}
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,14 +122,22 @@ class WatchtowerApp:
         self.flash_message = "Ready - F1 help, F2 theme"
         self.selected_agent_id: str | None = None
         self.selected_task_id: str | None = None
+        self.compare_group_id: str | None = None
+        self.inspect_agent_id: str | None = None
         self.show_help = False
         self.dragging_task_id: str | None = None
         self.task_scroll = 0
+        self.task_cursor = 0
         self.effects: list[list[float]] = []
+        self.metric_history: dict[str, deque[float]] = {}
+        self._spark_timer = 0.0
+        self._autosave_timer = 0.0
         self._completed_seen: set[str] = set()
         self._station_hits: list[tuple[pygame.Rect, str]] = []
         self._panel_task_hits: list[tuple[pygame.Rect, str]] = []
         self.running = True
+        if not os.getenv("WATCHTOWER_NO_AUTOSAVE"):
+            self._restore_autosave()
 
     # ----- main loop ---------------------------------------------------------
     def run(self) -> None:
@@ -133,9 +152,13 @@ class WatchtowerApp:
                 self._start_ready_model_calls()
                 self._sync_completion_effects()
                 self._update_effects(dt)
+                self._sample_metrics(dt)
+                self._maybe_autosave(dt)
                 self._draw(provider_snapshot)
                 pygame.display.flip()
         finally:
+            if not os.getenv("WATCHTOWER_NO_AUTOSAVE"):
+                self._autosave()
             self.poller.stop()
             pygame.quit()
 
@@ -157,18 +180,18 @@ class WatchtowerApp:
 
     def _handle_keydown(self, event: pygame.event.Event) -> None:
         if event.key == pygame.K_ESCAPE:
-            if self.show_help:
-                self.show_help = False
-            elif self.selected_task_id:
-                self.selected_task_id = None
-            else:
+            if not self._close_overlay():
                 self.running = False
         elif event.key == pygame.K_F1:
             self.show_help = not self.show_help
         elif event.key == pygame.K_F2:
             self._toggle_theme()
+        elif event.key == pygame.K_DOWN:
+            self._move_task_cursor(1)
+        elif event.key == pygame.K_UP:
+            self._move_task_cursor(-1)
         elif event.key == pygame.K_RETURN:
-            self._submit_input()
+            self._handle_return()
         elif event.key == pygame.K_BACKSPACE:
             self.input_text = self.input_text[:-1]
         elif self._is_agent_shortcut(event):
@@ -176,12 +199,51 @@ class WatchtowerApp:
         elif event.unicode and len(self.input_text) < 180:
             self.input_text += event.unicode
 
+    def _close_overlay(self) -> bool:
+        if self.show_help:
+            self.show_help = False
+        elif self.selected_task_id:
+            self.selected_task_id = None
+        elif self.compare_group_id:
+            self.compare_group_id = None
+        elif self.inspect_agent_id:
+            self.inspect_agent_id = None
+        else:
+            return False
+        return True
+
+    def _handle_return(self) -> None:
+        # With an empty input box, Enter opens the keyboard-focused task.
+        if not self.input_text.strip():
+            tasks = self.simulation.snapshot().tasks
+            if tasks:
+                self.task_cursor = min(self.task_cursor, len(tasks) - 1)
+                self.selected_task_id = tasks[self.task_cursor].id
+                return
+        self._submit_input()
+
+    def _move_task_cursor(self, delta: int) -> None:
+        tasks = self.simulation.snapshot().tasks
+        if not tasks:
+            return
+        self.task_cursor = max(0, min(len(tasks) - 1, self.task_cursor + delta))
+        if self.task_cursor < self.task_scroll:
+            self.task_scroll = self.task_cursor
+        elif self.task_cursor >= self.task_scroll + 4:
+            self.task_scroll = self.task_cursor - 3
+
     def _handle_mouse_down(self, pos: tuple[int, int]) -> None:
         if self.show_help:
             self.show_help = False
             return
         if self.selected_task_id:
             self._handle_detail_click(pos)
+            return
+        if self.compare_group_id:
+            self._handle_compare_click(pos)
+            return
+        if self.inspect_agent_id:
+            self._handle_inspect_click(pos)
             return
         todo_task_id = self._todo_task_at(pos)
         if todo_task_id:
@@ -202,8 +264,8 @@ class WatchtowerApp:
             return
         world_agent = self._agent_at(pos)
         if world_agent:
-            self.selected_agent_id = world_agent
-            self.flash_message = f"Selected {self._agent_label(world_agent)}"
+            self.inspect_agent_id = world_agent
+            self.flash_message = f"Inspecting {self._agent_label(world_agent)}"
 
     def _resize(self, width: int, height: int) -> None:
         self.screen_width = max(MIN_WIDTH, width)
@@ -439,6 +501,50 @@ class WatchtowerApp:
         saved = export_task_text(path, task)
         self.flash_message = f"Exported {saved.name}"
 
+    # ----- autosave + telemetry history -------------------------------------
+    def _restore_autosave(self) -> None:
+        if not AUTOSAVE_PATH.exists():
+            return
+        try:
+            profiles, tasks = load_session(AUTOSAVE_PATH)
+        except (OSError, ValueError):
+            return
+        if not profiles:
+            return
+        self.simulation = SimulationState(profiles=profiles)
+        for task in tasks:
+            if not task.is_finished:
+                task.reset_for_retry()
+            self.simulation.tasks[task.id] = task
+        self.poller.set_profiles(profiles)
+        self._completed_seen = {task.id for task in tasks if task.status is TaskStatus.COMPLETE}
+        self.flash_message = f"Restored {len(tasks)} tasks"
+
+    def _autosave(self) -> None:
+        try:
+            save_session(AUTOSAVE_PATH, self.simulation.profiles, list(self.simulation.tasks.values()))
+        except OSError:
+            pass
+
+    def _maybe_autosave(self, dt: float) -> None:
+        if os.getenv("WATCHTOWER_NO_AUTOSAVE"):
+            return
+        self._autosave_timer += dt
+        if self._autosave_timer >= AUTOSAVE_INTERVAL:
+            self._autosave_timer = 0.0
+            self._autosave()
+
+    def _sample_metrics(self, dt: float) -> None:
+        self._spark_timer += dt
+        if self._spark_timer < SPARK_INTERVAL:
+            return
+        self._spark_timer = 0.0
+        for agent in self.simulation.agents.values():
+            history = self.metric_history.setdefault(agent.profile.id, deque(maxlen=SPARK_SAMPLES))
+            history.append(agent.metrics.load)
+        for stale in set(self.metric_history) - set(self.simulation.agents):
+            self.metric_history.pop(stale, None)
+
     # ----- model call plumbing ----------------------------------------------
     def _start_ready_model_calls(self) -> None:
         for task in self.simulation.tasks.values():
@@ -491,7 +597,8 @@ class WatchtowerApp:
             else:
                 result = payload
                 assert isinstance(result, ModelCallResult)
-                task.mark_model_result(result.text[:4000], latency_ms=result.latency_ms)
+                tokens = result.total_tokens or _estimate_tokens(task.prompt, result.text)
+                task.mark_model_result(result.text[:4000], latency_ms=result.latency_ms, tokens=tokens)
                 self.flash_message = f"{task.id} completed by {self._agent_label(agent_id)}"
             if agent_id and agent_id in self.simulation.agents:
                 self.simulation.agents[agent_id].current_task_id = None
@@ -520,6 +627,8 @@ class WatchtowerApp:
     def _draw(self, provider_snapshot) -> None:
         if self.selected_task_id and self.selected_task_id not in self.simulation.tasks:
             self.selected_task_id = None
+        if self.inspect_agent_id and self.inspect_agent_id not in self.simulation.agents:
+            self.inspect_agent_id = None
         self.screen.fill(self.theme.bg)
         snapshot = self.simulation.snapshot()
         self._draw_todo_panel(snapshot.tasks)
@@ -532,6 +641,10 @@ class WatchtowerApp:
         self._draw_input()
         if self.selected_task_id:
             self._draw_detail(self.simulation.tasks[self.selected_task_id])
+        if self.compare_group_id:
+            self._draw_compare()
+        if self.inspect_agent_id:
+            self._draw_inspect()
         if self.show_help:
             self._draw_help()
 
@@ -620,10 +733,11 @@ class WatchtowerApp:
                 pygame.draw.rect(self.screen, theme.surface_alt, row, border_radius=6)
                 pygame.draw.rect(self.screen, color, row, width=1, border_radius=6)
             pygame.draw.circle(self.screen, color, (PANEL_X + 28, y + 9), 7)
-            self._text(agent.profile.model_name[:26], PANEL_X + 44, y, self.font, theme.text)
+            self._text(agent.profile.model_name[:20], PANEL_X + 44, y, self.font, theme.text)
             connection = "live key" if self.model_api.is_configured(agent.profile) else agent.profile.provider
             status = f"{agent.status.value} | {connection} | {agent.metrics.latency_ms:.0f} ms"
             self._text(status, PANEL_X + 44, y + 18, self.small_font, theme.muted)
+            self._draw_sparkline(self.metric_history.get(agent.profile.id), pygame.Rect(PANEL_X + 196, y + 2, 46, 16), color)
             y += 48
 
         route = f"Route: {self._agent_label(self.selected_agent_id)}"
@@ -652,13 +766,17 @@ class WatchtowerApp:
         visible_count = 4
         max_scroll = max(0, len(tasks) - visible_count)
         self.task_scroll = min(self.task_scroll, max_scroll)
+        self.task_cursor = min(self.task_cursor, max(0, len(tasks) - 1))
         window = tasks[self.task_scroll:self.task_scroll + visible_count]
-        for task in window:
+        for offset, task in enumerate(window):
+            absolute_index = self.task_scroll + offset
             rect = pygame.Rect(PANEL_X + 18, y, 224, 50)
             color = theme.success if task.status is TaskStatus.COMPLETE else _priority_color(task.priority, theme)
             if task.status is TaskStatus.FAILED:
                 color = theme.danger
             pygame.draw.rect(self.screen, theme.surface_alt, rect, border_radius=6)
+            if absolute_index == self.task_cursor:
+                pygame.draw.rect(self.screen, theme.text, rect, width=1, border_radius=6)
             pygame.draw.rect(self.screen, color, (rect.x, rect.y, 4, 50), border_radius=2)
             self._text(task.title[:30], PANEL_X + 30, y + 7, self.small_font, theme.text)
             route_label = self._agent_label(task.assigned_agent_id or task.requested_agent_id)
@@ -703,7 +821,9 @@ class WatchtowerApp:
         route = self._agent_label(task.assigned_agent_id or task.requested_agent_id)
         meta = f"{task.status.value} | {route} | {task.priority.value} | {task.model_latency_ms:.0f} ms"
         self._text(meta, x, y, self.small_font, theme.muted)
-        y += 26
+        y += 20
+        self._text(self._token_cost_line(task), x, y, self.small_font, theme.muted)
+        y += 24
         text_width = rect.width - 2 * pad
         self._text("Prompt", x, y, self.font, theme.accent)
         y += 22
@@ -739,7 +859,8 @@ class WatchtowerApp:
             "Enter           submit task / command",
             "Drag todo       drop a todo card onto an agent",
             "Click task      open its detail (prompt + response)",
-            "Click agent     select for routing",
+            "Click agent     inspect it (metrics, task, activity)",
+            "Up/Down + Enter navigate tasks and open the focused one",
             "Ctrl/Alt+1-5    select an agent",
             "Mouse wheel     scroll the task list",
             "F1              toggle this help    F2  toggle theme",
@@ -766,6 +887,163 @@ class WatchtowerApp:
         overlay.fill((*self.theme.overlay, 190))
         self.screen.blit(overlay, (0, 0))
 
+    def _draw_sparkline(self, history: deque[float] | None, rect: pygame.Rect, color: tuple[int, int, int]) -> None:
+        if not history or len(history) < 2:
+            return
+        count = len(history)
+        points = []
+        for index, value in enumerate(history):
+            px = rect.x + int(rect.width * index / (count - 1))
+            py = rect.bottom - int(rect.height * max(0.0, min(1.0, value)))
+            points.append((px, py))
+        pygame.draw.lines(self.screen, color, False, points, 1)
+
+    def _token_cost_line(self, task: SubmittedTask) -> str:
+        agent = self.simulation.agents.get(task.assigned_agent_id or task.requested_agent_id or "")
+        provider = agent.profile.provider if agent else "local"
+        if task.actual_tokens:
+            cost = task.actual_tokens / 1000 * PRICE_PER_1K.get(provider, 0.0)
+            return f"{task.actual_tokens} tokens  ~${cost:.4f} est ({provider})"
+        return f"~{task.estimated_tokens} tokens (estimate)"
+
+    # ----- comparison overlay ------------------------------------------------
+    def _group_tasks(self, group_id: str | None) -> list[SubmittedTask]:
+        order = list(self.simulation.agents)
+        tasks = [task for task in self.simulation.tasks.values() if task.group_id == group_id]
+
+        def sort_key(task: SubmittedTask) -> int:
+            agent_id = task.assigned_agent_id or task.requested_agent_id
+            return order.index(agent_id) if agent_id in order else len(order)
+
+        return sorted(tasks, key=sort_key)
+
+    def _compare_rect(self) -> pygame.Rect:
+        rect = pygame.Rect(0, 0, min(760, self.screen_width - 60), min(560, self.screen_height - 80))
+        rect.center = (self.screen_width // 2, self.screen_height // 2)
+        return rect
+
+    def _overlay_close_rect(self, rect: pygame.Rect) -> pygame.Rect:
+        return pygame.Rect(rect.right - 78, rect.y + 16, 60, 26)
+
+    def _draw_compare(self) -> None:
+        theme = self.theme
+        self._draw_backdrop()
+        rect = self._compare_rect()
+        pygame.draw.rect(self.screen, theme.surface, rect, border_radius=10)
+        pygame.draw.rect(self.screen, theme.accent, rect, width=1, border_radius=10)
+        self._text("Comparison", rect.x + 18, rect.y + 16, self.title_font, theme.text)
+        close = self._overlay_close_rect(rect)
+        pygame.draw.rect(self.screen, theme.accent, close, border_radius=6)
+        self._text("Close", close.x + 10, close.y + 6, self.small_font, theme.bg)
+        tasks = self._group_tasks(self.compare_group_id)
+        if not tasks:
+            self._text("No tasks in this comparison", rect.x + 18, rect.y + 60, self.font, theme.muted)
+            return
+        cols = 2 if len(tasks) > 1 else 1
+        rows = (len(tasks) + cols - 1) // cols
+        col_w = (rect.width - 36 - (cols - 1) * 12) // cols
+        col_h = max(90, (rect.height - 84 - (rows - 1) * 12) // rows)
+        for index, task in enumerate(tasks):
+            cx = rect.x + 18 + (index % cols) * (col_w + 12)
+            cy = rect.y + 56 + (index // cols) * (col_h + 12)
+            card = pygame.Rect(cx, cy, col_w, col_h)
+            pygame.draw.rect(self.screen, theme.surface_alt, card, border_radius=8)
+            agent = self.simulation.agents.get(task.assigned_agent_id or task.requested_agent_id or "")
+            color = _hex_to_rgb(agent.profile.accent_color, theme.accent) if agent else theme.accent
+            self._text(self._agent_label(task.assigned_agent_id or task.requested_agent_id)[:18], cx + 10, cy + 6, self.font, color)
+            self._text(f"{task.status.value} {task.progress * 100:>3.0f}%", cx + 10, cy + 26, self.small_font, theme.muted)
+            body = task.model_response or task.model_partial or task.model_error or "(waiting)"
+            ty = cy + 46
+            max_lines = max(1, (card.bottom - ty - 6) // 16)
+            for line in self._wrap(body, self.small_font, col_w - 20)[:max_lines]:
+                self._text(line, cx + 10, ty, self.small_font, theme.text)
+                ty += 16
+
+    def _handle_compare_click(self, pos: tuple[int, int]) -> None:
+        rect = self._compare_rect()
+        if self._overlay_close_rect(rect).collidepoint(pos) or not rect.collidepoint(pos):
+            self.compare_group_id = None
+
+    # ----- agent inspect overlay --------------------------------------------
+    def _inspect_rect(self) -> pygame.Rect:
+        rect = pygame.Rect(0, 0, min(520, self.screen_width - 80), min(440, self.screen_height - 120))
+        rect.center = (self.screen_width // 2, self.screen_height // 2)
+        return rect
+
+    def _inspect_button_rects(self, rect: pygame.Rect) -> dict[str, pygame.Rect]:
+        buttons: dict[str, pygame.Rect] = {}
+        bx = rect.x + 18
+        by = rect.bottom - 46
+        for name in ("Route here", "Remove", "Close"):
+            width = max(70, self.small_font.size(name)[0] + 20)
+            buttons[name] = pygame.Rect(bx, by, width, 30)
+            bx += width + 8
+        return buttons
+
+    def _draw_inspect(self) -> None:
+        theme = self.theme
+        agent = self.simulation.agents.get(self.inspect_agent_id or "")
+        if agent is None:
+            self.inspect_agent_id = None
+            return
+        self._draw_backdrop()
+        rect = self._inspect_rect()
+        pygame.draw.rect(self.screen, theme.surface, rect, border_radius=10)
+        pygame.draw.rect(self.screen, theme.accent, rect, width=1, border_radius=10)
+        color = _hex_to_rgb(agent.profile.accent_color, theme.accent)
+        x, y = rect.x + 18, rect.y + 16
+        self._text(agent.profile.display_name, x, y, self.title_font, color)
+        y += 34
+        metrics = agent.metrics
+        current = self.simulation.tasks.get(agent.current_task_id or "")
+        connection = "live key" if self.model_api.is_configured(agent.profile) else "demo"
+        lines = [
+            f"{agent.profile.model_name} | {agent.profile.provider} ({connection})",
+            f"status {agent.status.value} | action {agent.action.value.replace('_', ' ')}",
+            f"load {metrics.load * 100:.0f}% | latency {metrics.latency_ms:.0f} ms",
+            f"{metrics.tokens_per_minute:.0f} tok/min | error {metrics.error_rate * 100:.1f}% | active {metrics.active_tasks}",
+            f"current task: {current.title[:34] if current else 'idle'}",
+        ]
+        for line in lines:
+            self._text(line, x, y, self.small_font, theme.text)
+            y += 20
+        self._draw_sparkline(self.metric_history.get(agent.profile.id), pygame.Rect(x, y + 2, rect.width - 36, 30), color)
+        y += 40
+        self._text("Recent activity", x, y, self.font, theme.accent)
+        y += 22
+        events = [event for event in self.simulation.snapshot().events if event.agent_id == agent.profile.id]
+        for event in events[-4:][::-1]:
+            message = f"{event.elapsed_seconds:05.1f}s {event.message or event.action.value}"
+            self._text(message[:48], x, y, self.small_font, theme.muted)
+            y += 18
+        for name, brect in self._inspect_button_rects(rect).items():
+            pygame.draw.rect(self.screen, theme.danger if name == "Remove" else theme.accent, brect, border_radius=6)
+            self._text(name, brect.x + 10, brect.y + 7, self.small_font, theme.bg)
+
+    def _handle_inspect_click(self, pos: tuple[int, int]) -> None:
+        rect = self._inspect_rect()
+        if not rect.collidepoint(pos):
+            self.inspect_agent_id = None
+            return
+        agent_id = self.inspect_agent_id
+        for name, brect in self._inspect_button_rects(rect).items():
+            if not brect.collidepoint(pos):
+                continue
+            if name == "Close":
+                self.inspect_agent_id = None
+            elif name == "Route here" and agent_id:
+                self.selected_agent_id = agent_id
+                self.flash_message = f"Routing to {self._agent_label(agent_id)}"
+                self.inspect_agent_id = None
+            elif name == "Remove" and agent_id:
+                self.simulation.remove_agent(agent_id)
+                self.poller.set_profiles(self.simulation.profiles)
+                if self.selected_agent_id == agent_id:
+                    self.selected_agent_id = None
+                self.inspect_agent_id = None
+                self.flash_message = f"Removed {agent_id}"
+            return
+
     # ----- detail interaction ------------------------------------------------
     def _detail_rect(self) -> pygame.Rect:
         rect = pygame.Rect(0, 0, min(620, self.screen_width - 80), min(460, self.screen_height - 120))
@@ -781,6 +1059,8 @@ class WatchtowerApp:
             names.append("Cancel")
         if task.model_response or task.model_error:
             names.append("Export")
+        if task.group_id:
+            names.append("Group")
         names.extend(["Delete", "Close"])
         buttons: dict[str, pygame.Rect] = {}
         bx = rect.x + 18
@@ -815,6 +1095,9 @@ class WatchtowerApp:
         elif name == "Export":
             saved = export_task_text(f"{task.id}.md", task)
             self.flash_message = f"Exported {saved.name}"
+        elif name == "Group":
+            self.compare_group_id = task.group_id
+            self.selected_task_id = None
 
     def _station_at(self, pos: tuple[int, int]) -> str | None:
         for rect, task_id in self._station_hits:
@@ -957,6 +1240,10 @@ def _dim(color: tuple[int, int, int], factor: float) -> tuple[int, int, int]:
 def _blend(color: tuple[int, int, int], other: tuple[int, int, int], amount: float) -> tuple[int, int, int]:
     amount = max(0.0, min(1.0, amount))
     return tuple(int(c + (o - c) * amount) for c, o in zip(color, other))
+
+
+def _estimate_tokens(prompt: str, text: str) -> int:
+    return max(1, (len(prompt) + len(text)) // 4)
 
 
 def _priority_color(priority: TaskPriority, theme: Theme) -> tuple[int, int, int]:

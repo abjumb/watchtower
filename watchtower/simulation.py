@@ -94,6 +94,7 @@ class SimulationState:
             submitted_by=submitted_by,
             requested_agent_id=requested_agent_id,
             priority=priority,
+            estimated_tokens=200 + len(clean_prompt) // 4,
             group_id=group_id,
         )
         self.tasks[task.id] = task

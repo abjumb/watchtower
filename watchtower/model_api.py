@@ -16,6 +16,7 @@ class ModelCallResult:
     agent_id: str
     text: str
     latency_ms: float
+    total_tokens: int = 0
 
 
 @dataclass(slots=True)
@@ -78,10 +79,10 @@ class ModelApiClient:
                 return ModelCallResult(profile.id, text, (time.monotonic() - started) * 1000)
             except _StreamUnavailable:
                 pass  # nothing streamed yet — fall back to a normal blocking call
-        text = await self._run_blocking(profile, prompt)
-        return ModelCallResult(profile.id, text, (time.monotonic() - started) * 1000)
+        text, tokens = await self._run_blocking(profile, prompt)
+        return ModelCallResult(profile.id, text, (time.monotonic() - started) * 1000, tokens)
 
-    async def _run_blocking(self, profile: AgentProfile, prompt: str) -> str:
+    async def _run_blocking(self, profile: AgentProfile, prompt: str) -> tuple[str, int]:
         if profile.provider == "openai":
             return await self._run_openai(profile.api_model, prompt)
         if profile.provider == "anthropic":
@@ -90,20 +91,19 @@ class ModelApiClient:
             return await self._run_gemini(profile.api_model, prompt)
         if profile.provider == "local" and self.config.local_base_url:
             return await self._run_local(profile.api_model, prompt)
-        return f"{profile.display_name} is a local demo agent. No remote API call was made."
+        return f"{profile.display_name} is a local demo agent. No remote API call was made.", 0
 
-    async def _run_openai(self, model: str, prompt: str) -> str:
+    async def _run_openai(self, model: str, prompt: str) -> tuple[str, int]:
         headers = {"Authorization": f"Bearer {self.config.openai_api_key}"}
         payload = {"model": model, "input": prompt}
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
         response.raise_for_status()
         data = response.json()
-        if data.get("output_text"):
-            return str(data["output_text"])
-        return _extract_text(data)
+        text = str(data["output_text"]) if data.get("output_text") else _extract_text(data)
+        return text, _total_tokens(data)
 
-    async def _run_anthropic(self, model: str, prompt: str) -> str:
+    async def _run_anthropic(self, model: str, prompt: str) -> tuple[str, int]:
         headers = {
             "x-api-key": self.config.anthropic_api_key,
             "anthropic-version": "2023-06-01",
@@ -116,17 +116,19 @@ class ModelApiClient:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
         response.raise_for_status()
-        return _extract_text(response.json())
+        data = response.json()
+        return _extract_text(data), _total_tokens(data)
 
-    async def _run_gemini(self, model: str, prompt: str) -> str:
+    async def _run_gemini(self, model: str, prompt: str) -> tuple[str, int]:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         payload = {"contents": [{"parts": [{"text": prompt}]}]}
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(url, params={"key": self.config.gemini_api_key}, json=payload)
         response.raise_for_status()
-        return _extract_text(response.json())
+        data = response.json()
+        return _extract_text(data), _total_tokens(data)
 
-    async def _run_local(self, model: str, prompt: str) -> str:
+    async def _run_local(self, model: str, prompt: str) -> tuple[str, int]:
         url = f"{self.config.local_base_url}/chat/completions"
         payload = {"model": model or "local", "messages": [{"role": "user", "content": prompt}]}
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -134,11 +136,11 @@ class ModelApiClient:
         response.raise_for_status()
         data = response.json()
         choices = data.get("choices") or []
+        text = ""
         if choices:
             message = choices[0].get("message") or {}
-            if message.get("content"):
-                return str(message["content"])
-        return _extract_text(data)
+            text = str(message.get("content") or "")
+        return text or _extract_text(data), _total_tokens(data)
 
     async def _run_streaming(self, profile: AgentProfile, prompt: str, on_delta: Callable[[str], None]) -> str:
         emitted = 0
@@ -224,6 +226,24 @@ def _extract_text(value: object) -> str:
             if text:
                 texts.append(text)
     return "\n".join(texts)
+
+
+def _total_tokens(data: object) -> int:
+    """Pull a total token count out of the differently-named provider usage blocks."""
+    if not isinstance(data, dict):
+        return 0
+    usage = data.get("usage")
+    if isinstance(usage, dict):
+        if usage.get("total_tokens"):
+            return int(usage["total_tokens"])
+        inp = usage.get("input_tokens") or usage.get("prompt_tokens") or 0
+        out = usage.get("output_tokens") or usage.get("completion_tokens") or 0
+        if inp or out:
+            return int(inp) + int(out)
+    meta = data.get("usageMetadata")
+    if isinstance(meta, dict) and meta.get("totalTokenCount"):
+        return int(meta["totalTokenCount"])
+    return 0
 
 
 class _StreamUnavailable(Exception):
