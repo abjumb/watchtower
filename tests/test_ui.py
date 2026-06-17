@@ -366,6 +366,49 @@ def test_add_agent_dialog_creates_agent() -> None:
         assert any(p.id == "qwen" for p in app.poller._profiles)
 
 
+def test_toolbar_compare_honours_priority_prefix() -> None:
+    from watchtower.models import TaskPriority
+
+    with make_app() as app:
+        app.input_text = "!high brainstorm names"
+        app._toolbar_compare()
+        tasks = list(app.simulation.tasks.values())
+        assert tasks, "compare should have created tasks"
+        assert all(t.priority is TaskPriority.HIGH for t in tasks)
+        assert all(t.prompt == "brainstorm names" for t in tasks)
+        assert app.input_text == ""
+
+
+def test_toolbar_compare_strips_target_prefix() -> None:
+    with make_app() as app:
+        app.input_text = "@gpt brainstorm names"
+        app._toolbar_compare()
+        tasks = list(app.simulation.tasks.values())
+        assert len(tasks) == len(app.simulation.agents)
+        # The @gpt target is stripped, not sent as literal prompt text.
+        assert all(t.prompt == "brainstorm names" for t in tasks)
+
+
+def test_add_agent_rejects_blank_model_for_real_provider() -> None:
+    with make_app() as app:
+        assert app._add_agent("ghost", "openai", "", "Ghost") is False
+        assert "ghost" not in app.simulation.agents
+        # local agents may omit a model (they fall back to a stub).
+        assert app._add_agent("edge", "local", "", "Edge") is True
+        assert "edge" in app.simulation.agents
+
+
+def test_open_menu_click_through_acts_on_target() -> None:
+    with make_app() as app:
+        _render_frame(app)
+        app.menu.open = True
+        # A single click on a toolbar button should close the menu AND act.
+        button = next(b for b in app._toolbar_buttons() if b.label == "Settings")
+        app._handle_mouse_down(button.rect.center)
+        assert not app.menu.open
+        assert app.show_settings
+
+
 def test_add_agent_dialog_tab_cycles_focus() -> None:
     with make_app() as app:
         app._open_add_agent()

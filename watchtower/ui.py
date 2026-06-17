@@ -302,11 +302,12 @@ class WatchtowerApp:
         if self.inspect_agent_id:
             self._handle_inspect_click(pos)
             return
-        # Toolbar: the menu dropdown consumes clicks while open.
+        # Toolbar menu: clicks on the button/items are consumed; a click
+        # elsewhere closes the menu and still falls through to act on the target.
         if self.menu.open:
-            self.menu.handle_click(pos)
-            return
-        if self.menu.rect.collidepoint(pos):
+            if self.menu.handle_click(pos):
+                return
+        elif self.menu.rect.collidepoint(pos):
             self.menu.handle_click(pos)
             return
         for button in self._toolbar_buttons():
@@ -748,12 +749,24 @@ class WatchtowerApp:
 
     # ----- toolbar / menu actions -------------------------------------------
     def _toolbar_compare(self) -> None:
-        prompt = self.input_text.strip()
-        if not prompt:
+        text = self.input_text.strip()
+        if not text:
             self.flash_message = "Type a prompt, then Compare"
             return
+        # Compare always fans out, so honour !priority and strip a leading
+        # @all / @agent target rather than sending it as literal prompt text.
+        if text.lower().startswith("@all ") or text.lower() == "@all":
+            text = text[4:].strip()
+        else:
+            agent_id, stripped = self._parse_targeted_prompt(text)
+            if agent_id:
+                text = stripped
+        priority, rest = self._parse_priority(text)
+        if not rest:
+            self.flash_message = "Type a prompt to compare"
+            return
         self.input_text = ""
-        tasks = self.simulation.submit_comparison(prompt)
+        tasks = self.simulation.submit_comparison(rest, priority=priority)
         self.flash_message = f"Comparing across {len(tasks)} agents"
 
     def _toolbar_clear(self) -> None:
@@ -926,6 +939,9 @@ class WatchtowerApp:
             return False
         if provider not in {"openai", "anthropic", "gemini", "local"}:
             self.flash_message = f"Unknown provider: {provider}"
+            return False
+        if provider != "local" and not model:
+            self.flash_message = f"{provider} agent needs a model"
             return False
         if agent_id in self.simulation.agents:
             self.flash_message = f"Agent {agent_id} exists"
