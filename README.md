@@ -2,6 +2,20 @@
 
 Lightweight top-down Pygame simulation for watching distinct AI model agents accept tasks and move through realtime actions.
 
+## Download
+
+Standalone builds for **Windows, macOS and Linux** are attached to each
+[GitHub Release](https://github.com/abjumb/watchtower/releases) — no Python install required. Grab
+the file for your OS and run it:
+
+- **Windows** — `Watchtower-Windows.exe` (double-click). Unsigned, so SmartScreen may warn the first
+  time: *More info → Run anyway*.
+- **macOS** — `Watchtower-macOS.zip` (unzip, then run `Watchtower.app`). Unsigned, so Gatekeeper may
+  block it: right-click → *Open* the first time. The build targets Apple Silicon.
+- **Linux** — `Watchtower-Linux` (`chmod +x Watchtower-Linux && ./Watchtower-Linux`).
+
+To run from source instead, see [Run](#run) below.
+
 ## Run
 
 Use Python 3.11 or 3.12. The existing Python 3.14 virtualenv may try to build Pygame from source and fail without SDL development headers.
@@ -11,6 +25,24 @@ python -m venv .venv
 .venv/bin/python -m pip install -e .
 .venv/bin/python -m watchtower
 ```
+
+### Building standalone executables
+
+Releases are built by `.github/workflows/release.yml`: pushing a `v*` tag builds the three
+executables with [PyInstaller](https://pyinstaller.org) on Windows/macOS/Linux runners and attaches
+them to that tag's release. You can also run the workflow manually (**Actions → Build executables →
+Run workflow**) to download the binaries as artifacts without cutting a release. Because PyInstaller
+cannot cross-compile, each OS is built on its own runner.
+
+To build for your current platform locally:
+
+```bash
+.venv/bin/python -m pip install pyinstaller
+.venv/bin/python -m PyInstaller --onefile --name Watchtower watchtower/__main__.py
+# add --noconsole (Windows) or --windowed (macOS) to hide the terminal window
+```
+
+The result lands in `dist/`.
 
 ## Controls
 
