@@ -83,14 +83,22 @@ threads → snapshot/queue → `SimulationState.update()` → draw.
 - **`persistence.py`** — Pure JSON (de)serialization. `save_session`/`load_session`
   round-trip profiles + tasks; `export_task_text` writes one task's prompt/response
   to Markdown. No pygame, no network.
+- **`widgets.py`** — Tiny in-engine pygame widget toolkit (`Button`, `TextInput`,
+  `Toggle`, `Dropdown`). Each widget owns its rect, hit-testing, and theme-aware
+  drawing; `TextInput` is focusable with a caret. No game/sim coupling — `ui.py`
+  positions widgets and wires callbacks.
 - **`auth.py`** — `AuthConfig` for the *telemetry* endpoint (separate from model
   API keys). Supports OAuth bearer, basic login, or demo mode; `mode` and
   `is_remote_enabled` decide whether the provider goes remote.
 - **`ui.py`** — `WatchtowerApp` owns the pygame window, event loop, all drawing,
   and the wiring between the above. This is the only module that mounts the parts
-  together. Colors are semantic tokens on a `Theme` (`DARK_THEME`/`LIGHT_THEME`,
-  toggled with `F2`/`/theme`) — draw code reads `self.theme.<token>` rather than raw
-  constants. Layout constants (`LEFT_PANEL_WIDTH`, `WORLD_X`, `PANEL_X`) live at the
+  together. It also hosts the GUI built from `widgets.py`: a bottom toolbar (a `Menu`
+  `Dropdown` + Compare/Clear/Theme/Settings buttons), the focusable prompt `TextInput`
+  (the `input_text` property proxies its value, so commands/tests still read/write a
+  string), and modal Settings / Add-agent dialogs. `self.focus` tracks the active text
+  field; keystrokes route to it unless they're global shortcuts. Colors are semantic
+  tokens on a `Theme` (`DARK_THEME`/`LIGHT_THEME`, toggled with `F2`/`/theme` or the
+  Settings toggle) — draw code reads `self.theme.<token>` rather than raw constants. Layout constants (`LEFT_PANEL_WIDTH`, `WORLD_X`, `PANEL_X`) live at the
   top; the window is resizable and `self.screen_width`/`self.screen_height` track the
   current size (clamped to `MIN_WIDTH`/`MIN_HEIGHT`). Overlays (`_draw_detail`,
   `_draw_compare`, `_draw_inspect`, `_draw_help`) and completion effects render on top

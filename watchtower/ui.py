@@ -24,6 +24,7 @@ from watchtower.models import (
 )
 from watchtower.persistence import export_task_text, load_session, save_session
 from watchtower.simulation import WORLD_HEIGHT, WORLD_WIDTH, SimulationState
+from watchtower.widgets import Button, Dropdown, TextInput, Toggle
 
 
 LEFT_PANEL_WIDTH = 236
@@ -120,13 +121,35 @@ class WatchtowerApp:
         self.running_model_tasks: set[str] = set()
         self._dispatch_token: dict[str, int] = {}
         self._dispatch_seq = 0
-        self.input_text = ""
+        self.text_input = TextInput(pygame.Rect(16, 0, 200, 52), focused=True)
+        self.add_agent_inputs = {
+            "id": TextInput(pygame.Rect(0, 0, 10, 30), placeholder="id e.g. qwen"),
+            "provider": TextInput(pygame.Rect(0, 0, 10, 30), placeholder="provider (openai/anthropic/gemini/local)"),
+            "model": TextInput(pygame.Rect(0, 0, 10, 30), placeholder="model"),
+            "name": TextInput(pygame.Rect(0, 0, 10, 30), placeholder="display name (optional)"),
+        }
+        self.focus: TextInput | None = self.text_input
+        self.menu = Dropdown("Menu", pygame.Rect(16, 0, 120, 26))
+        self.menu.items = [
+            ("Compare input prompt", self._toolbar_compare),
+            ("Clear finished tasks", self._toolbar_clear),
+            ("Add agent...", self._open_add_agent),
+            ("Settings...", self._open_settings),
+            ("Save session", self._menu_save),
+            ("Load session", self._menu_load),
+            ("Toggle theme", self._toggle_theme),
+            ("Help (F1)", self._open_help),
+            ("Quit", self._quit),
+        ]
+        self.autosave_enabled = not os.getenv("WATCHTOWER_NO_AUTOSAVE")
         self.flash_message = "Ready - F1 help, F2 theme"
         self.selected_agent_id: str | None = None
         self.selected_task_id: str | None = None
         self.compare_group_id: str | None = None
         self.inspect_agent_id: str | None = None
         self.show_help = False
+        self.show_settings = False
+        self.show_add_agent = False
         self.dragging_task_id: str | None = None
         self.task_scroll = 0
         self.task_cursor = 0
@@ -141,6 +164,18 @@ class WatchtowerApp:
         self.running = True
         if not os.getenv("WATCHTOWER_NO_AUTOSAVE"):
             self._restore_autosave()
+
+    # The main prompt is backed by the TextInput widget.
+    @property
+    def input_text(self) -> str:
+        return self.text_input.value
+
+    @input_text.setter
+    def input_text(self, value: str) -> None:
+        self.text_input.set(value)
+
+    def _blink(self) -> bool:
+        return (self.simulation.elapsed_seconds % 1.0) < 0.5
 
     # ----- main loop ---------------------------------------------------------
     def run(self) -> None:
@@ -160,7 +195,7 @@ class WatchtowerApp:
                 self._draw(provider_snapshot)
                 pygame.display.flip()
         finally:
-            if not os.getenv("WATCHTOWER_NO_AUTOSAVE"):
+            if self.autosave_enabled:
                 self._autosave()
             self.poller.stop()
             pygame.quit()
@@ -192,21 +227,23 @@ class WatchtowerApp:
             self.show_help = not self.show_help
         elif event.key == pygame.K_F2:
             self._toggle_theme()
-        elif event.key == pygame.K_DOWN and not self.input_text:
-            self._move_task_cursor(1)
-        elif event.key == pygame.K_UP and not self.input_text:
-            self._move_task_cursor(-1)
-        elif event.key == pygame.K_RETURN:
-            self._handle_return()
-        elif event.key == pygame.K_BACKSPACE:
-            self.input_text = self.input_text[:-1]
         elif self._is_agent_shortcut(event):
             self._select_agent_by_index(event.key - pygame.K_1)
-        elif event.unicode and len(self.input_text) < 180:
-            self.input_text += event.unicode
+        elif event.key == pygame.K_TAB and self.show_add_agent:
+            self._cycle_add_agent_focus()
+        elif event.key in (pygame.K_DOWN, pygame.K_UP) and not self.input_text and self.focus is self.text_input:
+            self._move_task_cursor(1 if event.key == pygame.K_DOWN else -1)
+        elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            self._handle_return()
+        elif self.focus is not None:
+            self.focus.handle_key(event)
 
     def _close_overlay(self) -> bool:
-        if self.show_help:
+        if self.show_add_agent:
+            self._close_add_agent()
+        elif self.show_settings:
+            self._close_settings()
+        elif self.show_help:
             self.show_help = False
         elif self.selected_task_id:
             self.selected_task_id = None
@@ -214,11 +251,18 @@ class WatchtowerApp:
             self.compare_group_id = None
         elif self.inspect_agent_id:
             self.inspect_agent_id = None
+        elif self.menu.open:
+            self.menu.open = False
         else:
             return False
         return True
 
     def _handle_return(self) -> None:
+        if self.show_add_agent:
+            self._create_agent_from_dialog()
+            return
+        if self.show_settings:
+            return
         # With an empty input box, Enter opens the keyboard-focused task.
         if not self.input_text.strip():
             tasks = self.simulation.snapshot().tasks
@@ -239,6 +283,13 @@ class WatchtowerApp:
             self.task_scroll = self.task_cursor - 3
 
     def _handle_mouse_down(self, pos: tuple[int, int]) -> None:
+        self._layout_widgets()
+        if self.show_settings:
+            self._settings_click(pos)
+            return
+        if self.show_add_agent:
+            self._add_agent_click(pos)
+            return
         if self.show_help:
             self.show_help = False
             return
@@ -251,12 +302,25 @@ class WatchtowerApp:
         if self.inspect_agent_id:
             self._handle_inspect_click(pos)
             return
+        # Toolbar: the menu dropdown consumes clicks while open.
+        if self.menu.open:
+            self.menu.handle_click(pos)
+            return
+        if self.menu.rect.collidepoint(pos):
+            self.menu.handle_click(pos)
+            return
+        for button in self._toolbar_buttons():
+            if button.handle_click(pos):
+                return
         todo_task_id = self._todo_task_at(pos)
         if todo_task_id:
             self.dragging_task_id = todo_task_id
             return
         if self._submit_rect().collidepoint(pos):
             self._submit_input()
+            return
+        if self.text_input.handle_click(pos):
+            self._focus(self.text_input)
             return
         station_task = self._station_at(pos)
         if station_task:
@@ -451,27 +515,8 @@ class WatchtowerApp:
             if len(parts) < 3:
                 self.flash_message = "Use /agent add ID PROVIDER MODEL [Name]"
                 return
-            agent_id, provider, model = parts[0].lower(), parts[1].lower(), parts[2]
-            display = parts[3] if len(parts) > 3 else agent_id.title()
-            if provider not in {"openai", "anthropic", "gemini", "local"}:
-                self.flash_message = f"Unknown provider: {provider}"
-                return
-            if agent_id in self.simulation.agents:
-                self.flash_message = f"Agent {agent_id} exists"
-                return
-            color = AGENT_COLORS[len(self.simulation.agents) % len(AGENT_COLORS)]
-            profile = AgentProfile(
-                id=agent_id,
-                display_name=display,
-                model_name=f"{display} {model}".strip(),
-                accent_color=color,
-                glyph=agent_id[:3].upper(),
-                provider=provider,
-                api_model=model,
-            )
-            self.simulation.add_agent(profile)
-            self.poller.set_profiles(self.simulation.profiles)
-            self.flash_message = f"Added {display}"
+            name = parts[3] if len(parts) > 3 else ""
+            self._add_agent(parts[0], parts[1], parts[2], name)
             return
         self.flash_message = "Use /agent add|remove ..."
 
@@ -534,7 +579,7 @@ class WatchtowerApp:
             pass
 
     def _maybe_autosave(self, dt: float) -> None:
-        if os.getenv("WATCHTOWER_NO_AUTOSAVE"):
+        if not self.autosave_enabled:
             return
         self._autosave_timer += dt
         if self._autosave_timer >= AUTOSAVE_INTERVAL:
@@ -649,6 +694,7 @@ class WatchtowerApp:
 
     # ----- drawing -----------------------------------------------------------
     def _draw(self, provider_snapshot) -> None:
+        self._layout_widgets()
         if self.selected_task_id and self.selected_task_id not in self.simulation.tasks:
             self.selected_task_id = None
         if self.inspect_agent_id and self.inspect_agent_id not in self.simulation.agents:
@@ -663,6 +709,9 @@ class WatchtowerApp:
         self._draw_effects()
         self._draw_panel(snapshot, provider_snapshot)
         self._draw_input()
+        modal_open = self.show_settings or self.show_add_agent or self.show_help or self.selected_task_id or self.compare_group_id or self.inspect_agent_id
+        if self.menu.open and not modal_open:
+            self.menu.draw_items(self.screen, self.theme, self.small_font, pygame.mouse.get_pos())
         if self.selected_task_id:
             self._draw_detail(self.simulation.tasks[self.selected_task_id])
         if self.compare_group_id:
@@ -671,6 +720,231 @@ class WatchtowerApp:
             self._draw_inspect()
         if self.show_help:
             self._draw_help()
+        if self.show_settings:
+            self._draw_settings()
+        if self.show_add_agent:
+            self._draw_add_agent()
+
+    def _layout_widgets(self) -> None:
+        input_y = self.screen_height - 86
+        self.text_input.rect = pygame.Rect(16, input_y, self.screen_width - 150, 52)
+        self.menu.rect = pygame.Rect(16, self.screen_height - 120, 120, 26)
+
+    def _toolbar_buttons(self) -> list[Button]:
+        toolbar_y = self.screen_height - 120
+        x = 16 + self.menu.rect.width + 8
+        specs = [
+            ("Compare", self._toolbar_compare),
+            ("Clear", self._toolbar_clear),
+            ("Theme", self._toggle_theme),
+            ("Settings", self._open_settings),
+        ]
+        buttons = []
+        for label, callback in specs:
+            width = max(72, self.small_font.size(label)[0] + 22)
+            buttons.append(Button(label, pygame.Rect(x, toolbar_y, width, 26), callback, style="ghost"))
+            x += width + 8
+        return buttons
+
+    # ----- toolbar / menu actions -------------------------------------------
+    def _toolbar_compare(self) -> None:
+        prompt = self.input_text.strip()
+        if not prompt:
+            self.flash_message = "Type a prompt, then Compare"
+            return
+        self.input_text = ""
+        tasks = self.simulation.submit_comparison(prompt)
+        self.flash_message = f"Comparing across {len(tasks)} agents"
+
+    def _toolbar_clear(self) -> None:
+        removed = self.simulation.clear_finished()
+        self.task_scroll = 0
+        self.flash_message = f"Cleared {removed} finished tasks"
+
+    def _menu_save(self) -> None:
+        saved = save_session(DEFAULT_SAVE_PATH, self.simulation.profiles, list(self.simulation.tasks.values()))
+        self.flash_message = f"Saved to {saved.name}"
+
+    def _menu_load(self) -> None:
+        self._handle_load(DEFAULT_SAVE_PATH)
+
+    def _open_help(self) -> None:
+        self.menu.open = False
+        self.show_help = True
+
+    def _quit(self) -> None:
+        self.running = False
+
+    def _focus(self, widget: TextInput | None) -> None:
+        self.text_input.focused = widget is self.text_input
+        for field in self.add_agent_inputs.values():
+            field.focused = widget is field
+        self.focus = widget
+
+    # ----- settings dialog ---------------------------------------------------
+    def _open_settings(self) -> None:
+        self.menu.open = False
+        self.show_add_agent = False
+        self.show_settings = True
+        self._focus(None)
+
+    def _close_settings(self) -> None:
+        self.show_settings = False
+        self._focus(self.text_input)
+
+    def _settings_rect(self) -> pygame.Rect:
+        rect = pygame.Rect(0, 0, min(480, self.screen_width - 80), min(340, self.screen_height - 120))
+        rect.center = (self.screen_width // 2, self.screen_height // 2)
+        return rect
+
+    def _set_theme(self, light: bool) -> None:
+        self.theme = LIGHT_THEME if light else DARK_THEME
+
+    def _set_autosave(self, value: bool) -> None:
+        self.autosave_enabled = value
+
+    def _settings_widgets(self) -> tuple[list[Toggle], list[Button]]:
+        rect = self._settings_rect()
+        x = rect.x + 20
+        toggles = [
+            Toggle(pygame.Rect(x, rect.y + 60, 240, 22), "Light theme", self.theme is LIGHT_THEME, self._set_theme),
+            Toggle(pygame.Rect(x, rect.y + 96, 240, 22), "Auto-save session", self.autosave_enabled, self._set_autosave),
+        ]
+        buttons: list[Button] = []
+        bx, by = x, rect.y + 150
+        for label, callback in (("Save now", self._menu_save), ("Load", self._menu_load), ("Clear finished", self._toolbar_clear), ("Add agent...", self._open_add_agent)):
+            width = max(96, self.small_font.size(label)[0] + 22)
+            if bx + width > rect.right - 20:
+                bx, by = x, by + 38
+            buttons.append(Button(label, pygame.Rect(bx, by, width, 30), callback, style="ghost"))
+            bx += width + 8
+        buttons.append(Button("Close", pygame.Rect(rect.right - 92, rect.bottom - 44, 72, 30), self._close_settings))
+        return toggles, buttons
+
+    def _draw_settings(self) -> None:
+        theme = self.theme
+        self._draw_backdrop()
+        rect = self._settings_rect()
+        pygame.draw.rect(self.screen, theme.surface, rect, border_radius=10)
+        pygame.draw.rect(self.screen, theme.accent, rect, width=1, border_radius=10)
+        self._text("Settings", rect.x + 20, rect.y + 16, self.title_font, theme.text)
+        mouse = pygame.mouse.get_pos()
+        toggles, buttons = self._settings_widgets()
+        for toggle in toggles:
+            toggle.draw(self.screen, theme, self.font, mouse)
+        for button in buttons:
+            button.draw(self.screen, theme, self.small_font, mouse)
+
+    def _settings_click(self, pos: tuple[int, int]) -> None:
+        if not self._settings_rect().collidepoint(pos):
+            self._close_settings()
+            return
+        toggles, buttons = self._settings_widgets()
+        for widget in (*toggles, *buttons):
+            if widget.handle_click(pos):
+                return
+
+    # ----- add-agent dialog --------------------------------------------------
+    def _open_add_agent(self) -> None:
+        self.menu.open = False
+        self.show_settings = False
+        self.show_add_agent = True
+        for field in self.add_agent_inputs.values():
+            field.set("")
+        self.add_agent_inputs["provider"].set("local")
+        self._focus(self.add_agent_inputs["id"])
+
+    def _close_add_agent(self) -> None:
+        self.show_add_agent = False
+        self._focus(self.text_input)
+
+    def _add_agent_rect(self) -> pygame.Rect:
+        rect = pygame.Rect(0, 0, min(480, self.screen_width - 80), min(340, self.screen_height - 120))
+        rect.center = (self.screen_width // 2, self.screen_height // 2)
+        return rect
+
+    def _layout_add_agent(self) -> None:
+        rect = self._add_agent_rect()
+        y = rect.y + 56
+        for key in ("id", "provider", "model", "name"):
+            self.add_agent_inputs[key].rect = pygame.Rect(rect.x + 20, y, rect.width - 40, 30)
+            y += 44
+
+    def _add_agent_buttons(self) -> list[Button]:
+        rect = self._add_agent_rect()
+        return [
+            Button("Create", pygame.Rect(rect.x + 20, rect.bottom - 44, 96, 30), self._create_agent_from_dialog),
+            Button("Cancel", pygame.Rect(rect.x + 124, rect.bottom - 44, 96, 30), self._close_add_agent, style="ghost"),
+        ]
+
+    def _cycle_add_agent_focus(self) -> None:
+        keys = list(self.add_agent_inputs)
+        current = next((key for key in keys if self.add_agent_inputs[key].focused), None)
+        nxt = keys[(keys.index(current) + 1) % len(keys)] if current else keys[0]
+        self._focus(self.add_agent_inputs[nxt])
+
+    def _draw_add_agent(self) -> None:
+        theme = self.theme
+        self._draw_backdrop()
+        rect = self._add_agent_rect()
+        pygame.draw.rect(self.screen, theme.surface, rect, border_radius=10)
+        pygame.draw.rect(self.screen, theme.accent, rect, width=1, border_radius=10)
+        self._text("Add agent  (Tab to move, Enter to create)", rect.x + 20, rect.y + 16, self.font, theme.text)
+        self._layout_add_agent()
+        blink = self._blink()
+        for field in self.add_agent_inputs.values():
+            field.draw(self.screen, theme, self.small_font, blink)
+        mouse = pygame.mouse.get_pos()
+        for button in self._add_agent_buttons():
+            button.draw(self.screen, theme, self.small_font, mouse)
+
+    def _add_agent_click(self, pos: tuple[int, int]) -> None:
+        if not self._add_agent_rect().collidepoint(pos):
+            self._close_add_agent()
+            return
+        self._layout_add_agent()
+        for field in self.add_agent_inputs.values():
+            if field.handle_click(pos):
+                self._focus(field)
+                return
+        for button in self._add_agent_buttons():
+            if button.handle_click(pos):
+                return
+
+    def _create_agent_from_dialog(self) -> None:
+        values = {key: field.value for key, field in self.add_agent_inputs.items()}
+        if self._add_agent(values["id"], values["provider"], values["model"], values["name"]):
+            self._close_add_agent()
+
+    def _add_agent(self, agent_id: str, provider: str, model: str, name: str) -> bool:
+        agent_id = agent_id.strip().lower()
+        provider = (provider or "local").strip().lower()
+        model = model.strip()
+        name = name.strip()
+        if not agent_id:
+            self.flash_message = "Agent needs an id"
+            return False
+        if provider not in {"openai", "anthropic", "gemini", "local"}:
+            self.flash_message = f"Unknown provider: {provider}"
+            return False
+        if agent_id in self.simulation.agents:
+            self.flash_message = f"Agent {agent_id} exists"
+            return False
+        display = name or agent_id.title()
+        color = AGENT_COLORS[len(self.simulation.agents) % len(AGENT_COLORS)]
+        profile = AgentProfile(
+            id=agent_id,
+            display_name=display,
+            model_name=f"{display} {model}".strip(),
+            accent_color=color,
+            glyph=agent_id[:3].upper(),
+            provider=provider,
+            api_model=model,
+        )
+        self.simulation.add_agent(profile)
+        self.poller.set_profiles(self.simulation.profiles)
+        self.flash_message = f"Added {display}"
+        return True
 
     def _draw_world(self) -> None:
         theme = self.theme
@@ -819,17 +1093,17 @@ class WatchtowerApp:
 
     def _draw_input(self) -> None:
         theme = self.theme
-        rect = pygame.Rect(16, self.screen_height - 86, self.screen_width - 150, 52)
-        pygame.draw.rect(self.screen, theme.surface, rect, border_radius=8)
-        pygame.draw.rect(self.screen, theme.accent, rect, width=1, border_radius=8)
+        mouse = pygame.mouse.get_pos()
         target = self._agent_label(self.selected_agent_id)
-        placeholder = f"Task to {target} | @gpt .. | @all .. | !high .. | /compare | F1 help"
-        text = self.input_text or placeholder
-        color = theme.text if self.input_text else theme.muted
-        self._text(text[-120:], rect.x + 16, rect.y + 17, self.font, color)
+        self.text_input.placeholder = f"Task to {target}   @gpt ..   @all ..   !high ..   (F1 help)"
+        self.text_input.draw(self.screen, theme, self.font, self._blink())
         submit = self._submit_rect()
         pygame.draw.rect(self.screen, theme.accent, submit, border_radius=8)
         self._text("Submit", submit.x + 26, submit.y + 17, self.font, theme.bg)
+        # Toolbar (menu + quick actions) sits just above the input row.
+        self.menu.draw_button(self.screen, theme, self.small_font, mouse)
+        for button in self._toolbar_buttons():
+            button.draw(self.screen, theme, self.small_font, mouse)
 
     def _draw_detail(self, task: SubmittedTask) -> None:
         theme = self.theme
@@ -880,7 +1154,9 @@ class WatchtowerApp:
         self._text("Watchtower - keys & commands", x, y, self.title_font, theme.text)
         y += 38
         lines = [
-            "Enter           submit task / command",
+            "Toolbar         Menu dropdown + Compare / Clear / Theme / Settings",
+            "Settings        toggles (theme, auto-save) + Add agent dialog",
+            "Enter           submit task / command (or create agent in dialog)",
             "Drag todo       drop a todo card onto an agent",
             "Click task      open its detail (prompt + response)",
             "Click agent     inspect it (metrics, task, activity)",
