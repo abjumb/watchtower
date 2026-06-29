@@ -7,7 +7,10 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-import httpx
+try:
+    import httpx
+except ImportError:  # pragma: no cover - the browser/WASM demo build ships without httpx
+    httpx = None  # type: ignore[assignment]
 
 from watchtower.auth import AuthConfig
 from watchtower.models import AgentMetrics, AgentProfile, AgentStatus, AgentTelemetry
@@ -93,6 +96,14 @@ class AgentDataProvider:
             auth_mode=self.auth_config.mode,
             source_label="local demo telemetry",
         )
+
+    def demo_snapshot(self, profiles: Sequence[AgentProfile]) -> ProviderSnapshot:
+        """Synchronous demo telemetry snapshot (no thread, no network).
+
+        Used by the single-threaded browser/WASM loop, which cannot run the
+        background :class:`TelemetryPoller`.
+        """
+        return self._demo_snapshot(profiles)
 
     def _demo_telemetry(
         self,

@@ -100,7 +100,8 @@ PRIORITY_NAMES = {p.value: p for p in TaskPriority}
 
 
 class WatchtowerApp:
-    def __init__(self) -> None:
+    def __init__(self, web_mode: bool = False) -> None:
+        self.web_mode = web_mode
         pygame.init()
         pygame.display.set_caption("Watchtower")
         self.screen_width = SCREEN_WIDTH
@@ -141,7 +142,7 @@ class WatchtowerApp:
             ("Help (F1)", self._open_help),
             ("Quit", self._quit),
         ]
-        self.autosave_enabled = not os.getenv("WATCHTOWER_NO_AUTOSAVE")
+        self.autosave_enabled = not web_mode and not os.getenv("WATCHTOWER_NO_AUTOSAVE")
         self.flash_message = "Ready - F1 help, F2 theme"
         self.selected_agent_id: str | None = None
         self.selected_task_id: str | None = None
@@ -164,7 +165,7 @@ class WatchtowerApp:
         self._bg_surface: pygame.Surface | None = None
         self._bg_cache_key: tuple[int, int, str] | None = None
         self.running = True
-        if not os.getenv("WATCHTOWER_NO_AUTOSAVE"):
+        if not web_mode and not os.getenv("WATCHTOWER_NO_AUTOSAVE"):
             self._restore_autosave()
 
     # The main prompt is backed by the TextInput widget.
@@ -200,6 +201,31 @@ class WatchtowerApp:
             if self.autosave_enabled:
                 self._autosave()
             self.poller.stop()
+
+    async def run_async(self) -> None:
+        """Browser/pygbag entry point.
+
+        Single-threaded: no telemetry poller thread and no real model-call
+        threads (both impossible under Emscripten). Telemetry is computed
+        inline from the deterministic demo feed, and the loop yields to the
+        browser every frame with ``await asyncio.sleep(0)``.
+        """
+        snapshot = self.provider.demo_snapshot(self.simulation.profiles)
+        poll_timer = 0.0
+        while self.running:
+            dt = self.clock.tick(60) / 1000
+            self._handle_events()
+            poll_timer += dt
+            if poll_timer >= 2.0:
+                poll_timer = 0.0
+                snapshot = self.provider.demo_snapshot(self.simulation.profiles)
+            self.simulation.update(dt, snapshot.telemetry)
+            self._sync_completion_effects()
+            self._update_effects(dt)
+            self._sample_metrics(dt)
+            self._draw(snapshot)
+            pygame.display.flip()
+            await asyncio.sleep(0)
             pygame.quit()
 
     # ----- events ------------------------------------------------------------

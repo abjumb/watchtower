@@ -6,7 +6,10 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-import httpx
+try:
+    import httpx
+except ImportError:  # pragma: no cover - the browser/WASM demo build ships without httpx
+    httpx = None  # type: ignore[assignment]
 
 from watchtower.models import AgentProfile
 
