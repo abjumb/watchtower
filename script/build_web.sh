@@ -14,7 +14,7 @@ if [[ ! -x "$PYTHON" ]]; then
   echo "Missing .venv. Create it with Python 3.12 or 3.13, then rerun." >&2
   exit 1
 fi
-if ! "$PYTHON" -m pygbag --version >/dev/null 2>&1; then
+if ! "$PYTHON" -c "import pygbag" >/dev/null 2>&1; then
   echo "pygbag is not installed. Install it with:" >&2
   echo "  uv pip install --python .venv/bin/python 'pygbag>=0.9'" >&2
   exit 1
