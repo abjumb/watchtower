@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/alex-mac/Documents/local/watchtower-1/.codex/hooks/check-gstack.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

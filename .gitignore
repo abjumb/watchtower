@@ -15,5 +15,8 @@ env/
 # Watchtower runtime artifacts
 watchtower_session.json
 
+# Tool / IDE runtime state
+.omc/
+
 # OS / editor
 .DS_Store

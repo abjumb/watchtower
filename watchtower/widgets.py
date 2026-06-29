@@ -18,6 +18,17 @@ def _mix(a: tuple[int, int, int], b: tuple[int, int, int], t: float) -> tuple[in
     return tuple(int(x + (y - x) * t) for x, y in zip(a, b))
 
 
+def _liquid_rect(screen, rect: pygame.Rect, fill, border, radius: int = 8, shadow: bool = True) -> None:
+    if shadow:
+        shadow_surface = pygame.Surface((rect.width + 12, rect.height + 12), pygame.SRCALPHA)
+        pygame.draw.rect(shadow_surface, (0, 0, 0, 80), pygame.Rect(6, 7, rect.width, rect.height), border_radius=radius)
+        screen.blit(shadow_surface, (rect.x - 6, rect.y - 5))
+    pygame.draw.rect(screen, fill, rect, border_radius=radius)
+    highlight = _mix(fill, (255, 255, 255), 0.12)
+    pygame.draw.line(screen, highlight, (rect.x + radius, rect.y + 1), (rect.right - radius, rect.y + 1), 1)
+    pygame.draw.rect(screen, border, rect, width=1, border_radius=radius)
+
+
 @dataclass(slots=True)
 class Button:
     label: str
@@ -35,17 +46,17 @@ class Button:
     def draw(self, screen, theme, font, mouse: tuple[int, int]) -> None:
         hover = self.rect.collidepoint(mouse)
         if not self.enabled:
-            bg, fg = theme.surface_alt, theme.muted
+            bg, fg, border = theme.surface_alt, theme.muted, theme.grid
         elif self.style == "ghost":
-            bg = _mix(theme.surface_alt, theme.text, 0.10) if hover else theme.surface_alt
+            bg = _mix(theme.surface_alt, theme.text, 0.10) if hover else _mix(theme.surface_alt, theme.surface, 0.35)
             fg = theme.text
+            border = _mix(theme.grid, theme.text, 0.16) if hover else theme.grid
         else:
             base = theme.danger if self.style == "danger" else theme.accent
-            bg = _mix(base, theme.text, 0.12) if hover else base
+            bg = _mix(base, theme.text, 0.10) if hover else base
             fg = theme.bg
-        pygame.draw.rect(screen, bg, self.rect, border_radius=6)
-        if self.style == "ghost":
-            pygame.draw.rect(screen, theme.grid, self.rect, width=1, border_radius=6)
+            border = _mix(base, theme.text, 0.25)
+        _liquid_rect(screen, self.rect, bg, border, radius=8)
         label = font.render(self.label, True, fg)
         screen.blit(label, label.get_rect(center=self.rect.center))
 
@@ -103,9 +114,9 @@ class TextInput:
         return None
 
     def draw(self, screen, theme, font, blink: bool) -> None:
-        pygame.draw.rect(screen, theme.surface, self.rect, border_radius=8)
-        border = theme.accent if self.focused else theme.grid
-        pygame.draw.rect(screen, border, self.rect, width=1, border_radius=8)
+        fill = _mix(theme.surface_alt, theme.bg, 0.22)
+        border = theme.accent if self.focused else _mix(theme.grid, theme.text, 0.06)
+        _liquid_rect(screen, self.rect, fill, border, radius=10)
         inner_w = self.rect.width - 20
         ty = self.rect.y + (self.rect.height - font.get_height()) // 2
         tx = self.rect.x + 10
@@ -145,9 +156,11 @@ class Toggle:
     def draw(self, screen, theme, font, mouse: tuple[int, int]) -> None:
         track = pygame.Rect(self.rect.x, self.rect.y + 2, 38, 18)
         on = self.value
-        pygame.draw.rect(screen, theme.accent if on else theme.surface_alt, track, border_radius=9)
+        fill = theme.accent if on else _mix(theme.surface_alt, theme.bg, 0.18)
+        _liquid_rect(screen, track, fill, theme.grid, radius=9, shadow=False)
         knob_x = track.right - 9 if on else track.x + 9
-        pygame.draw.circle(screen, theme.bg if on else theme.muted, (knob_x, track.centery), 7)
+        knob = theme.bg if on else _mix(theme.text, theme.muted, 0.40)
+        pygame.draw.circle(screen, knob, (knob_x, track.centery), 7)
         label = font.render(self.label, True, theme.text)
         screen.blit(label, (track.right + 10, self.rect.y + (self.rect.height - font.get_height()) // 2))
 
@@ -184,9 +197,8 @@ class Dropdown:
 
     def draw_button(self, screen, theme, font, mouse: tuple[int, int]) -> None:
         hover = self.rect.collidepoint(mouse) or self.open
-        bg = _mix(theme.surface_alt, theme.text, 0.10) if hover else theme.surface_alt
-        pygame.draw.rect(screen, bg, self.rect, border_radius=6)
-        pygame.draw.rect(screen, theme.grid, self.rect, width=1, border_radius=6)
+        bg = _mix(theme.surface_alt, theme.text, 0.10) if hover else _mix(theme.surface_alt, theme.surface, 0.35)
+        _liquid_rect(screen, self.rect, bg, theme.grid, radius=8)
         label = font.render(f"☰ {self.label}", True, theme.text)
         screen.blit(label, label.get_rect(center=self.rect.center))
 
@@ -195,7 +207,7 @@ class Dropdown:
             return
         for rect, (label, _) in zip(self.item_rects(), self.items):
             hover = rect.collidepoint(mouse)
-            pygame.draw.rect(screen, _mix(theme.surface, theme.accent, 0.18) if hover else theme.surface, rect, border_radius=4)
-            pygame.draw.rect(screen, theme.grid, rect, width=1, border_radius=4)
+            fill = _mix(theme.surface, theme.accent, 0.18) if hover else _mix(theme.surface, theme.bg, 0.10)
+            _liquid_rect(screen, rect, fill, theme.grid, radius=6, shadow=False)
             text = font.render(label, True, theme.text)
             screen.blit(text, (rect.x + 10, rect.y + (rect.height - font.get_height()) // 2))
