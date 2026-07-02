@@ -35,19 +35,26 @@ Tests: `SDL_VIDEODRIVER=dummy WATCHTOWER_NO_AUTOSAVE=1 .venv/bin/python -m pytes
 
 | Date | Commit | Median ms/frame | Notes |
 |------|--------|-----------------|-------|
-| 2026-07-01 | 4e23a38 (master) | **2.4616** | medians [2.4616, 2.4769, 2.4819]; 64 tests green |
+| 2026-07-01 | 4e23a38 (master) | 2.4616 | medians [2.4616, 2.4769, 2.4819]; 64 tests green |
+| 2026-07-01 | claude/improvements P1 | **1.1219** | −54.4% vs 4e23a38; medians [1.2522, 1.1219, 1.1269]; 64 tests green; pixel-parity exact both themes |
 
 ## Loop state
 
-- Items completed this run: 0 / 10
+- Items completed this run: 1 / 10
 - Consecutive blocks: 0
 
 ---
 
 ## Items
 
-### 1. [ ] P1 · Bake static scene chrome into the cached background surface
-**Status:** todo · **Type:** perf · **Impact:** high · **Risk:** medium · **Files:** `watchtower/ui.py`
+### 1. [x] P1 · Bake static scene chrome into the cached background surface
+**Status:** awaiting-review · **Type:** perf · **Impact:** high · **Risk:** medium · **Files:** `watchtower/ui.py`
+
+> **Result (machine criteria met):** benchmark 2.4616 → 1.1219 ms/frame (−54.4%);
+> `_draw_world` cProfile share 44% → 0.24%; deterministic frame md5 identical
+> before/after in BOTH themes (refactor is provably render-neutral); 64 tests
+> green. Scope note: Models-panel frame and input dock intentionally stay live —
+> they are drawn after agents/effects and must cover glow overflow (z-order).
 
 ~70% of the base frame is pixel-identical chrome redrawn every frame. `_draw_world`
 (ui.py:991-1004) rebuilds the world liquid rect (918×638 SRCALPHA shadow + glow via
