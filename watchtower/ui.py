@@ -1008,9 +1008,9 @@ class WatchtowerApp:
         pygame.draw.circle(self.screen, color, (x, cy), 24)
         pygame.draw.circle(self.screen, _blend(theme.bg, theme.surface, 0.30), (x, cy), 17)
         self._draw_face(x, cy, agent.status, color)
-        name = self.small_font.render(agent.profile.display_name, True, theme.text)
+        name = _render_text(self.small_font, agent.profile.display_name, theme.text)
         self.screen.blit(name, name.get_rect(center=(x, cy + 38)))
-        action = self.small_font.render(agent.action.value.replace("_", " "), True, theme.muted)
+        action = _render_text(self.small_font, agent.action.value.replace("_", " "), theme.muted)
         self.screen.blit(action, action.get_rect(center=(x, cy + 54)))
         load_width = 42
         pygame.draw.rect(self.screen, _blend(theme.surface_alt, theme.bg, 0.18), (x - 21, cy - 38, load_width, 5), border_radius=3)
@@ -1042,7 +1042,7 @@ class WatchtowerApp:
             rect = pygame.Rect(WORLD_X + 84 + index * 145, WORLD_Y + WORLD_HEIGHT - 40, 106, 30)
             self._draw_liquid_rect(rect, fill=_blend(theme.surface_alt, theme.bg, 0.05), border=_priority_color(task.priority, theme), radius=8, shadow=False)
             pygame.draw.rect(self.screen, theme.accent, (rect.x, rect.y, int(rect.width * task.progress), 4), border_radius=2)
-            label = self.small_font.render(task.id, True, theme.text)
+            label = _render_text(self.small_font, task.id, theme.text)
             self.screen.blit(label, label.get_rect(center=rect.center))
             self._station_hits.append((rect, task.id))
 
@@ -1546,7 +1546,7 @@ class WatchtowerApp:
         surface: pygame.Surface | None = None,
     ) -> None:
         target = surface if surface is not None else self.screen
-        target.blit(font.render(text, True, color), (x, y))
+        target.blit(_render_text(font, text, color), (x, y))
 
     def _wrap(self, text: str, font: pygame.font.Font, max_width: int) -> list[str]:
         lines: list[str] = []
@@ -1651,6 +1651,28 @@ class WatchtowerApp:
             return "auto"
         agent = self.simulation.agents.get(agent_id)
         return agent.profile.display_name if agent else agent_id
+
+
+_TEXT_CACHE: dict[tuple[pygame.font.Font, str, tuple[int, int, int]], pygame.Surface] = {}
+_TEXT_CACHE_MAX = 512
+
+
+def _render_text(font: pygame.font.Font, text: str, color: tuple[int, int, int]) -> pygame.Surface:
+    """Cached font.render. Most drawn strings are unchanged frame-to-frame.
+
+    Keyed on the font object itself (not id()) so entries keep their font alive
+    and a freed font's id can never alias a new one. Churning strings (progress
+    percentages, event timestamps) eventually overflow the bound; the cache is
+    then cleared and rebuilt within a frame. Treat results as immutable.
+    """
+    key = (font, text, color)
+    surface = _TEXT_CACHE.get(key)
+    if surface is None:
+        if len(_TEXT_CACHE) >= _TEXT_CACHE_MAX:
+            _TEXT_CACHE.clear()
+        surface = font.render(text, True, color)
+        _TEXT_CACHE[key] = surface
+    return surface
 
 
 _AGENT_GLOW_CACHE: dict[tuple[int, int, int], pygame.Surface] = {}

@@ -37,11 +37,12 @@ Tests: `SDL_VIDEODRIVER=dummy WATCHTOWER_NO_AUTOSAVE=1 .venv/bin/python -m pytes
 |------|--------|-----------------|-------|
 | 2026-07-01 | 4e23a38 (master) | 2.4616 | medians [2.4616, 2.4769, 2.4819]; 64 tests green |
 | 2026-07-01 | claude/improvements P1 | 1.1219 | −54.4% vs 4e23a38; medians [1.2522, 1.1219, 1.1269]; 64 tests green; pixel-parity exact both themes |
-| 2026-07-01 | claude/improvements P2 | **0.8709** | −22.4% vs P1 (−64.6% cumulative); medians [0.8709, 0.8848, 0.8776]; caches stable at 11+5 entries over 200 frames; pixel-parity exact both themes |
+| 2026-07-01 | claude/improvements P2 | 0.8709 | −22.4% vs P1 (−64.6% cumulative); medians [0.8709, 0.8848, 0.8776]; caches stable at 11+5 entries over 200 frames; pixel-parity exact both themes |
+| 2026-07-01 | claude/improvements P3 | **0.7731** | −11.2% vs P2 (−68.6% cumulative); medians [0.7731, 0.7758, 0.7774]; 0 text-cache misses on identical redraw (42 entries); pixel-parity exact both themes |
 
 ## Loop state
 
-- Items completed this run: 2 / 10
+- Items completed this run: 3 / 10
 - Consecutive blocks: 0
 
 ---
@@ -98,8 +99,14 @@ text input, buttons, stations, agents, dialogs afterwards).
 `pygame.Surface` constructions originate from `_draw_liquid_rect`/`_liquid_rect`/
 `_draw_agent` (counter or profile); output pixel-identical in both themes; tests green.
 
-### 3. [ ] P3 · Memoized text-surface cache for per-frame `font.render` calls
-**Status:** todo · **Type:** perf · **Impact:** high · **Risk:** low · **Files:** `watchtower/ui.py`
+### 3. [x] P3 · Memoized text-surface cache for per-frame `font.render` calls
+**Status:** awaiting-review · **Type:** perf · **Impact:** high · **Risk:** low · **Files:** `watchtower/ui.py`
+
+> **Result (machine criteria met):** benchmark 0.8709 → 0.7731 ms/frame (−11.2%;
+> −68.6% cumulative vs master); 0 font.render calls on an identical redraw
+> (cache stable at 42 entries — beats the ≤3 criterion); all four ui.py render
+> sites (_text + agent name/action + station label) routed through the cache;
+> frame md5 identical to pre-P1 baseline in BOTH themes; 64 tests green.
 
 Every drawn string re-rasterizes each frame: `_text` (ui.py:1525-1526) calls
 `font.render` unconditionally, ~25-30×/frame with mostly unchanging inputs (static
