@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -213,6 +214,67 @@ class GitHubClient:
         if result.returncode != 0:
             raise RuntimeError(f"git clone failed for {repo}: {result.stderr.strip()[:300]}")
         return dest
+
+
+class IntegrationPoller:
+    """Background fetcher for external tasks (TelemetryPoller pattern).
+
+    A daemon thread polls both services every ``interval`` seconds — or sooner
+    when poke()d after a config change — and swaps the latest snapshot behind
+    a lock; the UI thread reads via latest(). Failures degrade to the previous
+    snapshot with last_error set instead of crashing the thread.
+    """
+
+    def __init__(self, todoist: TodoistClient, github: GitHubClient, interval: float = 60.0) -> None:
+        self.todoist = todoist
+        self.github = github
+        self.interval = interval
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._stopping = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._tasks: list[ExternalTask] = []
+        self._error: str | None = None
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stopping.clear()
+        self._thread = threading.Thread(target=self._run, name="integration-poller", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stopping.set()
+        self._wake.set()
+        if self._thread:
+            self._thread.join(timeout=2.0)
+
+    def poke(self) -> None:
+        """Request an early poll (after a token/scope change)."""
+        self._wake.set()
+
+    def latest(self) -> tuple[list[ExternalTask], str | None]:
+        with self._lock:
+            return list(self._tasks), self._error
+
+    def _run(self) -> None:
+        while not self._stopping.is_set():
+            self._cycle()
+            self._wake.wait(self.interval)
+            self._wake.clear()
+
+    def _cycle(self) -> None:
+        found: list[ExternalTask] = []
+        error: str | None = None
+        for fetch in (self.todoist.fetch_open_tasks, self.github.fetch_open_issues):
+            try:
+                found.extend(fetch())
+            except Exception as exc:  # degrade gracefully; the UI surfaces this
+                error = f"integration error: {exc}"[:120]
+        with self._lock:
+            if found or error is None:
+                self._tasks = found
+            self._error = error
 
 
 def repo_context(dest: Path, max_entries: int = 200, readme_chars: int = 2000) -> str:

@@ -136,3 +136,40 @@ def test_completion_comment_shapes_and_truncates() -> None:
     assert completion_comment("t", None).endswith("(no model response recorded)")
     long = completion_comment("t", "x" * 20000)
     assert len(long) <= 12000
+
+
+def test_ui_inbound_sync_and_commands(monkeypatch) -> None:
+    import os
+
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+    os.environ["WATCHTOWER_NO_AUTOSAVE"] = "1"
+    import pygame
+
+    from watchtower.models import TaskStatus
+    from watchtower.ui import WatchtowerApp
+
+    app = WatchtowerApp(web_mode=True)
+    try:
+        external = ExternalTask("todoist", "42", "buy milk", "", "")
+        monkeypatch.setattr(app.integration_poller, "latest", lambda: ([external], None))
+        app._sync_external_tasks()
+        app._sync_external_tasks()  # second pass must not duplicate the card
+        todos = [t for t in app.simulation.tasks.values() if t.status is TaskStatus.TODO]
+        assert len(todos) == 1
+        assert todos[0].prompt.startswith("[todoist] buy milk")
+        assert app.external_links[todos[0].id] == ("todoist", "42")
+
+        assert app._handle_command("/key todoist tok-x")
+        assert app.integration_config.todoist_token == "tok-x"
+        assert app._handle_command("/todoist Work")
+        assert app.integration_config.todoist_project == "Work"
+        assert app._handle_command("/github repo add acme/tool")
+        assert app.integration_config.github_repos == ["acme/tool"]
+        assert app._handle_command("/github repo remove acme/tool")
+        assert app.integration_config.github_repos == []
+        assert app._handle_command("/key openai sk-test")  # model keys still route through
+        assert app.flash_message == "openai key set"
+    finally:
+        app.poller.stop()
+        app.integration_poller.stop()
+        pygame.quit()
