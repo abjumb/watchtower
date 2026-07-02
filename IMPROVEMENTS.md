@@ -38,11 +38,12 @@ Tests: `SDL_VIDEODRIVER=dummy WATCHTOWER_NO_AUTOSAVE=1 .venv/bin/python -m pytes
 | 2026-07-01 | 4e23a38 (master) | 2.4616 | medians [2.4616, 2.4769, 2.4819]; 64 tests green |
 | 2026-07-01 | claude/improvements P1 | 1.1219 | −54.4% vs 4e23a38; medians [1.2522, 1.1219, 1.1269]; 64 tests green; pixel-parity exact both themes |
 | 2026-07-01 | claude/improvements P2 | 0.8709 | −22.4% vs P1 (−64.6% cumulative); medians [0.8709, 0.8848, 0.8776]; caches stable at 11+5 entries over 200 frames; pixel-parity exact both themes |
-| 2026-07-01 | claude/improvements P3 | **0.7731** | −11.2% vs P2 (−68.6% cumulative); medians [0.7731, 0.7758, 0.7774]; 0 text-cache misses on identical redraw (42 entries); pixel-parity exact both themes |
+| 2026-07-01 | claude/improvements P3 | 0.7731 | −11.2% vs P2 (−68.6% cumulative); medians [0.7731, 0.7758, 0.7774]; 0 text-cache misses on identical redraw (42 entries); pixel-parity exact both themes |
+| 2026-07-01 | claude/improvements P4 | **0.7796** | base scene unchanged — same-conditions A/B: P3 code = 0.7791 vs P4 = 0.7796 (machine drifted ~1% warmer since the P3 row). P4's target is the overlay path: detail overlay w/ 4000-char body now +1.06 ms over base (was ~+3.6 ms), wrap cache stable at 2 entries over 300 frames |
 
 ## Loop state
 
-- Items completed this run: 3 / 10
+- Items completed this run: 4 / 10
 - Consecutive blocks: 0
 
 ---
@@ -120,8 +121,17 @@ not cover (that's P6) — scope the structural check to `_text` call sites.
 consecutive draw of an unchanged scene performs ≤3 `font.render` calls from `_text`
 paths (vs ~40); frame pixel-identical in both themes; tests green.
 
-### 4. [ ] P4 · Memoize `_wrap` and stop wrapping past the visible line budget
-**Status:** todo · **Type:** perf · **Impact:** medium · **Risk:** low · **Files:** `watchtower/ui.py`
+### 4. [x] P4 · Memoize `_wrap` and stop wrapping past the visible line budget
+**Status:** awaiting-review · **Type:** perf · **Impact:** medium · **Risk:** low · **Files:** `watchtower/ui.py`
+
+> **Result (machine criteria met):** overlay frame with a 4000-char body is now
+> +1.06 ms over base (was ~+3.6 ms — 3.4× less overhead); 0 font.size calls in
+> the wrap path on repeat frames (cache stable at 2 entries over 300 frames);
+> base scene unchanged (same-conditions A/B: 0.7791 pre vs 0.7796 post); output
+> byte-identical (pure memoization — the line-budget early-stop was deliberately
+> NOT implemented because compare-overlay scrolling may depend on total line
+> count; a truncation would be a behavior change, not a pure perf win); frame
+> md5 identical to pre-P1 baseline in BOTH themes; 64 tests green.
 
 `_wrap` (ui.py:1528-1544) calls `font.size` once per word every frame while an
 overlay is open: detail overlay wraps the full ≤4000-char body (~480-650 words →

@@ -1549,6 +1549,13 @@ class WatchtowerApp:
         target.blit(_render_text(font, text, color), (x, y))
 
     def _wrap(self, text: str, font: pygame.font.Font, max_width: int) -> list[str]:
+        # Memoized: overlays re-wrap the same (text, width) every frame, at one
+        # font.size call per word (~500/frame for a 4000-char body). Callers
+        # only slice/iterate the result — do not mutate the returned list.
+        key = (font, text, max_width)
+        cached = _WRAP_CACHE.get(key)
+        if cached is not None:
+            return cached
         lines: list[str] = []
         for paragraph in text.split("\n"):
             if not paragraph:
@@ -1564,6 +1571,9 @@ class WatchtowerApp:
                     current = word
             if current:
                 lines.append(current)
+        if len(_WRAP_CACHE) >= _WRAP_CACHE_MAX:
+            _WRAP_CACHE.clear()
+        _WRAP_CACHE[key] = lines
         return lines
 
     def _agent_row_rect(self, index: int) -> pygame.Rect:
@@ -1655,6 +1665,9 @@ class WatchtowerApp:
 
 _TEXT_CACHE: dict[tuple[pygame.font.Font, str, tuple[int, int, int]], pygame.Surface] = {}
 _TEXT_CACHE_MAX = 512
+
+_WRAP_CACHE: dict[tuple[pygame.font.Font, str, int], list[str]] = {}
+_WRAP_CACHE_MAX = 128
 
 
 def _render_text(font: pygame.font.Font, text: str, color: tuple[int, int, int]) -> pygame.Surface:
