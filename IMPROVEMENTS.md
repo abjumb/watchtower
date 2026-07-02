@@ -45,9 +45,11 @@ Tests: `SDL_VIDEODRIVER=dummy WATCHTOWER_NO_AUTOSAVE=1 .venv/bin/python -m pytes
 
 | 2026-07-01 | claude/improvements P6 | **0.7642** | holds vs P5 (widget labels were ~5 renders/frame); medians [0.7642, 0.7674, 0.8219]; label cache stable at 5 entries over 100 frames; toolbar rebuilt only on resize (verified at 1500×900); pixel-parity exact both themes |
 
+| 2026-07-01 | claude/improvements P7 | **0.7677** | holds vs P6 (base-scene queue is small; guard's payoff scales with queue depth — 170 µs/frame at 490 queued in the verification microbenchmark); new test proves 0 scheduler sorts when all agents busy; pixel-parity exact both themes; 65 tests green |
+
 ## Loop state
 
-- Items completed this run: 6 / 10
+- Items completed this run: 7 / 10
 - Consecutive blocks: 0
 
 ---
@@ -198,8 +200,17 @@ second consecutive frame shows 0 `font.size`/`font.render` calls attributable to
 toolbar/menu widgets; buttons still fire at correct rects after resize; identical
 output in both themes; tests green.
 
-### 7. [ ] P7 · Skip scheduler rescan/re-sort when no agent is free
-**Status:** todo · **Type:** perf · **Impact:** medium (scales with queue) · **Risk:** low · **Files:** `watchtower/simulation.py`
+### 7. [x] P7 · Skip scheduler rescan/re-sort when no agent is free
+**Status:** awaiting-review · **Type:** perf · **Impact:** medium (scales with queue) · **Risk:** low · **Files:** `watchtower/simulation.py`, `tests/test_simulation.py`
+
+> **Result (machine criteria met):** early-exit guard added (`any current_task_id
+> is None` — the exact predicate both routing paths require, so behavior is
+> identical); new test `test_scheduler_skips_sorting_when_no_agent_is_free`
+> proves 0 sorts in _assign_waiting_tasks with 5 busy agents + 50 queued tasks
+> AND that routing resumes when an agent frees (suite now 65 tests, all green);
+> targeted-wait and busy-wait tests pass unchanged; benchmark holds at 0.7677
+> (payoff scales with queue depth); simulation.py remains pygame/network-free;
+> pixel-parity exact both themes.
 
 `_assign_waiting_tasks` (simulation.py:228-232) runs every frame: filters + sorts
 all SUBMITTED tasks, then per waiting task `_candidate_agents` (244-254) rebuilds
