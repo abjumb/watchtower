@@ -24,7 +24,7 @@ from watchtower.models import (
 )
 from watchtower.persistence import export_task_text, load_session, save_session
 from watchtower.simulation import WORLD_HEIGHT, WORLD_WIDTH, SimulationState
-from watchtower.widgets import Button, Dropdown, TextInput, Toggle
+from watchtower.widgets import Button, Dropdown, TextInput, Toggle, rounded_alpha_surface
 
 
 LEFT_PANEL_WIDTH = 236
@@ -155,7 +155,7 @@ class WatchtowerApp:
         self.task_scroll = 0
         self.task_cursor = 0
         self.compare_scroll = 0
-        self.effects: list[list[float]] = []
+        self.effects: list[list] = []  # [x, y, age, ttl, (r, g, b)]
         self.metric_history: dict[str, deque[float]] = {}
         self._spark_timer = 0.0
         self._autosave_timer = 0.0
@@ -164,6 +164,8 @@ class WatchtowerApp:
         self._panel_task_hits: list[tuple[pygame.Rect, str]] = []
         self._bg_surface: pygame.Surface | None = None
         self._bg_cache_key: tuple[int, int, str] | None = None
+        self._toolbar_cache: list[Button] | None = None
+        self._toolbar_cache_key: tuple[int, int] | None = None
         self.running = True
         if not web_mode and not os.getenv("WATCHTOWER_NO_AUTOSAVE"):
             self._restore_autosave()
@@ -706,15 +708,17 @@ class WatchtowerApp:
         for task in self.simulation.tasks.values():
             if task.status is TaskStatus.COMPLETE and task.id not in self._completed_seen:
                 self._completed_seen.add(task.id)
-                center = self._effect_origin(task)
-                self.effects.append([float(center[0]), float(center[1]), 0.0, 0.9])
+                center, color = self._effect_origin(task)
+                self.effects.append([float(center[0]), float(center[1]), 0.0, 0.9, color])
         self._completed_seen &= set(self.simulation.tasks)
 
-    def _effect_origin(self, task: SubmittedTask) -> tuple[int, int]:
+    def _effect_origin(self, task: SubmittedTask) -> tuple[tuple[int, int], tuple[int, int, int]]:
+        """Where a completion effect spawns, and the accent color it bursts in."""
         agent = self.simulation.agents.get(task.assigned_agent_id or task.requested_agent_id or "")
         if agent:
-            return self._agent_screen_position(agent)
-        return (WORLD_X + WORLD_WIDTH // 2, WORLD_Y + WORLD_HEIGHT // 2)
+            color = _hex_to_rgb(agent.profile.accent_color, self.theme.accent)
+            return self._agent_screen_position(agent), color
+        return (WORLD_X + WORLD_WIDTH // 2, WORLD_Y + WORLD_HEIGHT // 2), self.theme.success
 
     def _update_effects(self, dt: float) -> None:
         for effect in self.effects:
@@ -760,6 +764,11 @@ class WatchtowerApp:
         self.menu.rect = pygame.Rect(16, self.screen_height - 120, 120, 26)
 
     def _toolbar_buttons(self) -> list[Button]:
+        # Rebuilt only on resize: rects depend solely on the window size, and
+        # the labels/callbacks are constant.
+        key = (self.screen_width, self.screen_height)
+        if self._toolbar_cache_key == key and self._toolbar_cache is not None:
+            return self._toolbar_cache
         toolbar_y = self.screen_height - 120
         x = 16 + self.menu.rect.width + 8
         specs = [
@@ -773,6 +782,8 @@ class WatchtowerApp:
             width = max(72, self.small_font.size(label)[0] + 22)
             buttons.append(Button(label, pygame.Rect(x, toolbar_y, width, 26), callback, style="ghost"))
             x += width + 8
+        self._toolbar_cache = buttons
+        self._toolbar_cache_key = key
         return buttons
 
     # ----- toolbar / menu actions -------------------------------------------
@@ -989,19 +1000,9 @@ class WatchtowerApp:
         return True
 
     def _draw_world(self) -> None:
-        theme = self.theme
-        world = pygame.Rect(WORLD_X, WORLD_Y, WORLD_WIDTH, WORLD_HEIGHT)
-        self._draw_liquid_rect(world, fill=_blend(theme.surface, theme.bg, 0.12), border=theme.grid, radius=12, glow=theme.accent)
-        inner = world.inflate(-18, -18)
-        pygame.draw.rect(self.screen, _blend(theme.bg, theme.surface_alt, 0.18), inner, border_radius=10)
-        for x in range(64, WORLD_WIDTH, 64):
-            pygame.draw.line(self.screen, _blend(theme.grid, theme.bg, 0.45), (WORLD_X + x, WORLD_Y + 10), (WORLD_X + x, WORLD_Y + WORLD_HEIGHT - 10), 1)
-        for y in range(64, WORLD_HEIGHT, 64):
-            pygame.draw.line(self.screen, _blend(theme.grid, theme.bg, 0.45), (WORLD_X + 10, WORLD_Y + y), (WORLD_X + WORLD_WIDTH - 10, WORLD_Y + y), 1)
-        pygame.draw.circle(self.screen, _blend(theme.surface_alt, theme.accent, 0.18), (WORLD_X + WORLD_WIDTH // 2, WORLD_Y + WORLD_HEIGHT // 2), 190, width=1)
-        pygame.draw.circle(self.screen, _blend(theme.surface_alt, theme.bg, 0.22), (WORLD_X + WORLD_WIDTH // 2, WORLD_Y + WORLD_HEIGHT // 2), 310, width=1)
-        self._text("Watchtower", WORLD_X + 18, 30, self.title_font, theme.text)
-        self._text(self.flash_message, WORLD_X + 20, 60, self.small_font, theme.muted)
+        # Frame, grid, orbits, and title are baked into the cached background
+        # (_draw_static_chrome); only the live flash message is drawn here.
+        self._text(self.flash_message, WORLD_X + 20, 60, self.small_font, self.theme.muted)
 
     def _draw_agent(self, agent: AgentState) -> None:
         theme = self.theme
@@ -1011,19 +1012,16 @@ class WatchtowerApp:
         if agent.status is AgentStatus.WORKING:
             bob = int(round(2.5 * math.sin(self.simulation.elapsed_seconds * 6 + x)))
         cy = y + bob
-        glow = pygame.Surface((92, 92), pygame.SRCALPHA)
-        pygame.draw.circle(glow, (*color, 42), (46, 46), 38)
-        pygame.draw.circle(glow, (*color, 18), (46, 46), 45)
-        self.screen.blit(glow, (x - 46, cy - 46))
+        self.screen.blit(_agent_glow_surface(color), (x - 46, cy - 46))
         pygame.draw.circle(self.screen, _blend(color, theme.bg, 0.55), (x, cy), 31)
         if agent.profile.id == self.selected_agent_id:
             pygame.draw.circle(self.screen, _blend(theme.text, color, 0.18), (x, cy), 35, width=2)
         pygame.draw.circle(self.screen, color, (x, cy), 24)
         pygame.draw.circle(self.screen, _blend(theme.bg, theme.surface, 0.30), (x, cy), 17)
         self._draw_face(x, cy, agent.status, color)
-        name = self.small_font.render(agent.profile.display_name, True, theme.text)
+        name = _render_text(self.small_font, agent.profile.display_name, theme.text)
         self.screen.blit(name, name.get_rect(center=(x, cy + 38)))
-        action = self.small_font.render(agent.action.value.replace("_", " "), True, theme.muted)
+        action = _render_text(self.small_font, agent.action.value.replace("_", " "), theme.muted)
         self.screen.blit(action, action.get_rect(center=(x, cy + 54)))
         load_width = 42
         pygame.draw.rect(self.screen, _blend(theme.surface_alt, theme.bg, 0.18), (x - 21, cy - 38, load_width, 5), border_radius=3)
@@ -1055,16 +1053,27 @@ class WatchtowerApp:
             rect = pygame.Rect(WORLD_X + 84 + index * 145, WORLD_Y + WORLD_HEIGHT - 40, 106, 30)
             self._draw_liquid_rect(rect, fill=_blend(theme.surface_alt, theme.bg, 0.05), border=_priority_color(task.priority, theme), radius=8, shadow=False)
             pygame.draw.rect(self.screen, theme.accent, (rect.x, rect.y, int(rect.width * task.progress), 4), border_radius=2)
-            label = self.small_font.render(task.id, True, theme.text)
+            label = _render_text(self.small_font, task.id, theme.text)
             self.screen.blit(label, label.get_rect(center=rect.center))
             self._station_hits.append((rect, task.id))
 
     def _draw_effects(self) -> None:
-        for x, y, age, ttl in self.effects:
+        theme = self.theme
+        for x, y, age, ttl, color in self.effects:
             progress = age / ttl
-            radius = int(20 + 36 * progress)
-            color = _blend(self.theme.success, self.theme.bg, progress)
-            pygame.draw.circle(self.screen, color, (int(x), int(y)), radius, width=2)
+            eased = 1 - (1 - progress) ** 3
+            fade = _blend(color, theme.bg, progress)
+            pygame.draw.circle(self.screen, fade, (int(x), int(y)), int(20 + 36 * eased), width=2)
+            # Deterministic burst: angles seeded by spawn position so
+            # simultaneous effects don't look cloned.
+            base_angle = (x * 0.7 + y * 0.3) % (2 * math.pi)
+            dot_radius = max(1, int(3.5 * (1 - progress)))
+            distance = 14 + 46 * eased
+            for index in range(9):
+                angle = base_angle + index * (2 * math.pi / 9)
+                px = int(x + distance * math.cos(angle))
+                py = int(y + distance * math.sin(angle))
+                pygame.draw.circle(self.screen, fade, (px, py), dot_radius)
 
     def _draw_panel(self, snapshot, provider_snapshot) -> None:
         theme = self.theme
@@ -1254,7 +1263,34 @@ class WatchtowerApp:
             pygame.draw.circle(glow, (*self.theme.accent, 26), (WORLD_X + WORLD_WIDTH // 2, 56), 320)
             pygame.draw.circle(glow, (*self.theme.surface_alt, 68), (width - 210, height - 120), 260)
             surface.blit(glow, (0, 0))
+        self._draw_static_chrome(surface)
         return surface
+
+    def _draw_static_chrome(self, surface: pygame.Surface) -> None:
+        """Bake scene chrome that depends only on (size, theme) into the cached
+        background: todo-panel frame + headings, world frame/grid/orbits/title.
+
+        The Models panel frame and input dock stay live — they are drawn after
+        agents/effects in _draw, so their frames must cover any glow overflow.
+        Draw order here (todo frame, then world) matches the live order so the
+        world shadow overlaps the todo panel's right edge identically.
+        """
+        theme = self.theme
+        todo_panel = pygame.Rect(16, 16, LEFT_PANEL_WIDTH, WORLD_HEIGHT)
+        self._draw_liquid_rect(todo_panel, fill=_blend(theme.surface, theme.bg, 0.06), border=theme.grid, radius=12, surface=surface)
+        self._text("Todo", 34, 34, self.title_font, theme.text, surface=surface)
+        self._text("Drag tasks onto agents", 34, 64, self.small_font, theme.muted, surface=surface)
+        world = pygame.Rect(WORLD_X, WORLD_Y, WORLD_WIDTH, WORLD_HEIGHT)
+        self._draw_liquid_rect(world, fill=_blend(theme.surface, theme.bg, 0.12), border=theme.grid, radius=12, glow=theme.accent, surface=surface)
+        inner = world.inflate(-18, -18)
+        pygame.draw.rect(surface, _blend(theme.bg, theme.surface_alt, 0.18), inner, border_radius=10)
+        for x in range(64, WORLD_WIDTH, 64):
+            pygame.draw.line(surface, _blend(theme.grid, theme.bg, 0.45), (WORLD_X + x, WORLD_Y + 10), (WORLD_X + x, WORLD_Y + WORLD_HEIGHT - 10), 1)
+        for y in range(64, WORLD_HEIGHT, 64):
+            pygame.draw.line(surface, _blend(theme.grid, theme.bg, 0.45), (WORLD_X + 10, WORLD_Y + y), (WORLD_X + WORLD_WIDTH - 10, WORLD_Y + y), 1)
+        pygame.draw.circle(surface, _blend(theme.surface_alt, theme.accent, 0.18), (WORLD_X + WORLD_WIDTH // 2, WORLD_Y + WORLD_HEIGHT // 2), 190, width=1)
+        pygame.draw.circle(surface, _blend(theme.surface_alt, theme.bg, 0.22), (WORLD_X + WORLD_WIDTH // 2, WORLD_Y + WORLD_HEIGHT // 2), 310, width=1)
+        self._text("Watchtower", WORLD_X + 18, 30, self.title_font, theme.text, surface=surface)
 
     def _draw_liquid_rect(
         self,
@@ -1264,21 +1300,21 @@ class WatchtowerApp:
         radius: int = 10,
         shadow: bool = True,
         glow: tuple[int, int, int] | None = None,
+        surface: pygame.Surface | None = None,
     ) -> None:
+        target = surface if surface is not None else self.screen
         fill = fill or self.theme.surface
         border = border or self.theme.grid
         if shadow:
-            shadow_surface = pygame.Surface((rect.width + 18, rect.height + 18), pygame.SRCALPHA)
-            pygame.draw.rect(shadow_surface, (0, 0, 0, 110), pygame.Rect(9, 10, rect.width, rect.height), border_radius=radius)
-            self.screen.blit(shadow_surface, (rect.x - 9, rect.y - 8))
+            shadow_surface = rounded_alpha_surface((rect.width + 18, rect.height + 18), (9, 10, rect.width, rect.height), radius, (0, 0, 0, 110))
+            target.blit(shadow_surface, (rect.x - 9, rect.y - 8))
         if glow:
-            glow_surface = pygame.Surface((rect.width + 16, rect.height + 16), pygame.SRCALPHA)
-            pygame.draw.rect(glow_surface, (*glow, 30), pygame.Rect(4, 4, rect.width + 8, rect.height + 8), border_radius=radius + 5)
-            self.screen.blit(glow_surface, (rect.x - 8, rect.y - 8))
-        pygame.draw.rect(self.screen, fill, rect, border_radius=radius)
+            glow_surface = rounded_alpha_surface((rect.width + 16, rect.height + 16), (4, 4, rect.width + 8, rect.height + 8), radius + 5, (*glow, 30))
+            target.blit(glow_surface, (rect.x - 8, rect.y - 8))
+        pygame.draw.rect(target, fill, rect, border_radius=radius)
         sheen = _blend(fill, self.theme.text, 0.12)
-        pygame.draw.line(self.screen, sheen, (rect.x + radius, rect.y + 1), (rect.right - radius, rect.y + 1), 1)
-        pygame.draw.rect(self.screen, border, rect, width=1, border_radius=radius)
+        pygame.draw.line(target, sheen, (rect.x + radius, rect.y + 1), (rect.right - radius, rect.y + 1), 1)
+        pygame.draw.rect(target, border, rect, width=1, border_radius=radius)
 
     def _draw_action_button(self, rect: pygame.Rect, label: str, danger: bool = False) -> None:
         fill = self.theme.danger if danger else self.theme.accent
@@ -1522,10 +1558,26 @@ class WatchtowerApp:
     def _submit_rect(self) -> pygame.Rect:
         return pygame.Rect(self.screen_width - 120, self.screen_height - 86, 104, 52)
 
-    def _text(self, text: str, x: int, y: int, font: pygame.font.Font, color: tuple[int, int, int]) -> None:
-        self.screen.blit(font.render(text, True, color), (x, y))
+    def _text(
+        self,
+        text: str,
+        x: int,
+        y: int,
+        font: pygame.font.Font,
+        color: tuple[int, int, int],
+        surface: pygame.Surface | None = None,
+    ) -> None:
+        target = surface if surface is not None else self.screen
+        target.blit(_render_text(font, text, color), (x, y))
 
     def _wrap(self, text: str, font: pygame.font.Font, max_width: int) -> list[str]:
+        # Memoized: overlays re-wrap the same (text, width) every frame, at one
+        # font.size call per word (~500/frame for a 4000-char body). Callers
+        # only slice/iterate the result — do not mutate the returned list.
+        key = (font, text, max_width)
+        cached = _WRAP_CACHE.get(key)
+        if cached is not None:
+            return cached
         lines: list[str] = []
         for paragraph in text.split("\n"):
             if not paragraph:
@@ -1541,17 +1593,18 @@ class WatchtowerApp:
                     current = word
             if current:
                 lines.append(current)
+        if len(_WRAP_CACHE) >= _WRAP_CACHE_MAX:
+            _WRAP_CACHE.clear()
+        _WRAP_CACHE[key] = lines
         return lines
 
     def _agent_row_rect(self, index: int) -> pygame.Rect:
         return pygame.Rect(PANEL_X + 14, 66 + index * 48, 232, 42)
 
     def _draw_todo_panel(self, tasks: list[SubmittedTask]) -> None:
+        # Panel frame and headings are baked into the cached background
+        # (_draw_static_chrome); only task-dependent content is drawn here.
         theme = self.theme
-        panel = pygame.Rect(16, 16, LEFT_PANEL_WIDTH, WORLD_HEIGHT)
-        self._draw_liquid_rect(panel, fill=_blend(theme.surface, theme.bg, 0.06), border=theme.grid, radius=12)
-        self._text("Todo", 34, 34, self.title_font, theme.text)
-        self._text("Drag tasks onto agents", 34, 64, self.small_font, theme.muted)
         todo_tasks = [task for task in tasks if task.status is TaskStatus.TODO]
         if not todo_tasks:
             self._text("Type a task below", 34, 104, self.font, theme.muted)
@@ -1630,6 +1683,52 @@ class WatchtowerApp:
             return "auto"
         agent = self.simulation.agents.get(agent_id)
         return agent.profile.display_name if agent else agent_id
+
+
+_TEXT_CACHE: dict[tuple[pygame.font.Font, str, tuple[int, int, int]], pygame.Surface] = {}
+_TEXT_CACHE_MAX = 512
+
+_WRAP_CACHE: dict[tuple[pygame.font.Font, str, int], list[str]] = {}
+_WRAP_CACHE_MAX = 128
+
+
+def _render_text(font: pygame.font.Font, text: str, color: tuple[int, int, int]) -> pygame.Surface:
+    """Cached font.render. Most drawn strings are unchanged frame-to-frame.
+
+    Keyed on the font object itself (not id()) so entries keep their font alive
+    and a freed font's id can never alias a new one. Churning strings (progress
+    percentages, event timestamps) eventually overflow the bound; the cache is
+    then cleared and rebuilt within a frame. Treat results as immutable.
+    """
+    key = (font, text, color)
+    surface = _TEXT_CACHE.get(key)
+    if surface is None:
+        if len(_TEXT_CACHE) >= _TEXT_CACHE_MAX:
+            _TEXT_CACHE.clear()
+        surface = font.render(text, True, color)
+        _TEXT_CACHE[key] = surface
+    return surface
+
+
+_AGENT_GLOW_CACHE: dict[tuple[int, int, int], pygame.Surface] = {}
+_AGENT_GLOW_CACHE_MAX = 32
+
+
+def _agent_glow_surface(color: tuple[int, int, int]) -> pygame.Surface:
+    """Cached per-accent-color agent glow (two alpha circles on 92x92).
+
+    The bitmap depends only on the resolved RGB, so each color rasterizes once
+    instead of once per agent per frame. Treat the result as immutable.
+    """
+    surface = _AGENT_GLOW_CACHE.get(color)
+    if surface is None:
+        if len(_AGENT_GLOW_CACHE) >= _AGENT_GLOW_CACHE_MAX:
+            _AGENT_GLOW_CACHE.clear()
+        surface = pygame.Surface((92, 92), pygame.SRCALPHA)
+        pygame.draw.circle(surface, (*color, 42), (46, 46), 38)
+        pygame.draw.circle(surface, (*color, 18), (46, 46), 45)
+        _AGENT_GLOW_CACHE[color] = surface
+    return surface
 
 
 def _hex_to_rgb(value: str, fallback: tuple[int, int, int]) -> tuple[int, int, int]:

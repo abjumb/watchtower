@@ -226,6 +226,11 @@ class SimulationState:
         )
 
     def _assign_waiting_tasks(self) -> None:
+        # No free agent means nothing can be assigned via either routing path
+        # (_candidate_agents requires current_task_id is None in both), so skip
+        # the per-frame filter/sort of the waiting queue entirely.
+        if not any(agent.current_task_id is None for agent in self.agents.values()):
+            return
         waiting = sorted(
             (task for task in self.tasks.values() if task.status is TaskStatus.SUBMITTED),
             key=lambda task: (task.priority.rank, task.created_at),

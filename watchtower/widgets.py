@@ -18,10 +18,53 @@ def _mix(a: tuple[int, int, int], b: tuple[int, int, int], t: float) -> tuple[in
     return tuple(int(x + (y - x) * t) for x, y in zip(a, b))
 
 
+_ALPHA_CACHE: dict[tuple, pygame.Surface] = {}
+_ALPHA_CACHE_MAX = 64
+
+
+def rounded_alpha_surface(
+    size: tuple[int, int],
+    rect: tuple[int, int, int, int],
+    radius: int,
+    rgba: tuple[int, int, int, int],
+) -> pygame.Surface:
+    """Cached SRCALPHA surface with one rounded rect rasterized onto it.
+
+    Shadow/glow bitmaps depend only on geometry + color, so render each distinct
+    one once and blit it many times. Callers must treat the result as immutable.
+    The distinct-key set is small and layout-stable; on overflow the cache is
+    simply cleared and rebuilt within a frame.
+    """
+    key = (*size, *rect, radius, rgba)
+    surface = _ALPHA_CACHE.get(key)
+    if surface is None:
+        if len(_ALPHA_CACHE) >= _ALPHA_CACHE_MAX:
+            _ALPHA_CACHE.clear()
+        surface = pygame.Surface(size, pygame.SRCALPHA)
+        pygame.draw.rect(surface, rgba, pygame.Rect(rect), border_radius=radius)
+        _ALPHA_CACHE[key] = surface
+    return surface
+
+
+_LABEL_CACHE: dict[tuple, pygame.Surface] = {}
+_LABEL_CACHE_MAX = 256
+
+
+def _render_label(font, text: str, color: tuple[int, int, int]) -> pygame.Surface:
+    """Cached font.render for widget labels (constant strings, per-frame draws)."""
+    key = (font, text, color)
+    surface = _LABEL_CACHE.get(key)
+    if surface is None:
+        if len(_LABEL_CACHE) >= _LABEL_CACHE_MAX:
+            _LABEL_CACHE.clear()
+        surface = font.render(text, True, color)
+        _LABEL_CACHE[key] = surface
+    return surface
+
+
 def _liquid_rect(screen, rect: pygame.Rect, fill, border, radius: int = 8, shadow: bool = True) -> None:
     if shadow:
-        shadow_surface = pygame.Surface((rect.width + 12, rect.height + 12), pygame.SRCALPHA)
-        pygame.draw.rect(shadow_surface, (0, 0, 0, 80), pygame.Rect(6, 7, rect.width, rect.height), border_radius=radius)
+        shadow_surface = rounded_alpha_surface((rect.width + 12, rect.height + 12), (6, 7, rect.width, rect.height), radius, (0, 0, 0, 80))
         screen.blit(shadow_surface, (rect.x - 6, rect.y - 5))
     pygame.draw.rect(screen, fill, rect, border_radius=radius)
     highlight = _mix(fill, (255, 255, 255), 0.12)
@@ -57,7 +100,7 @@ class Button:
             fg = theme.bg
             border = _mix(base, theme.text, 0.25)
         _liquid_rect(screen, self.rect, bg, border, radius=8)
-        label = font.render(self.label, True, fg)
+        label = _render_label(font, self.label, fg)
         screen.blit(label, label.get_rect(center=self.rect.center))
 
 
@@ -69,6 +112,11 @@ class TextInput:
     focused: bool = False
     caret: int = 0
     max_len: int = 400
+    # Draw cache: the caret-scroll loops cost O(len) font.size calls per frame,
+    # so scroll/surface/caret-x are recomputed only when this key changes.
+    _draw_cache_key: tuple | None = field(default=None, init=False, repr=False)
+    _draw_surface: pygame.Surface | None = field(default=None, init=False, repr=False)
+    _draw_caret_x: int = field(default=0, init=False, repr=False)
 
     def set(self, text: str) -> None:
         self.value = text[: self.max_len]
@@ -121,21 +169,29 @@ class TextInput:
         ty = self.rect.y + (self.rect.height - font.get_height()) // 2
         tx = self.rect.x + 10
         if not self.value:
-            placeholder = font.render(self.placeholder, True, theme.muted)
-            screen.blit(placeholder, (tx, ty))
+            key = ("placeholder", font, self.placeholder, theme.name)
+            if self._draw_cache_key != key:
+                self._draw_surface = font.render(self.placeholder, True, theme.muted)
+                self._draw_cache_key = key
+            screen.blit(self._draw_surface, (tx, ty))
             if self.focused and blink:
                 pygame.draw.line(screen, theme.text, (tx, ty + 2), (tx, ty + font.get_height() - 2), 1)
             return
-        # Scroll the text so the caret stays visible inside the field.
-        start = 0
-        while start < self.caret and font.size(self.value[start : self.caret])[0] > inner_w:
-            start += 1
-        display = self.value[start:]
-        while display and font.size(display)[0] > inner_w:
-            display = display[:-1]
-        screen.blit(font.render(display, True, theme.text), (tx, ty))
+        key = ("value", font, self.value, self.caret, inner_w, theme.name)
+        if self._draw_cache_key != key:
+            # Scroll the text so the caret stays visible inside the field.
+            start = 0
+            while start < self.caret and font.size(self.value[start : self.caret])[0] > inner_w:
+                start += 1
+            display = self.value[start:]
+            while display and font.size(display)[0] > inner_w:
+                display = display[:-1]
+            self._draw_surface = font.render(display, True, theme.text)
+            self._draw_caret_x = font.size(self.value[start : self.caret])[0]
+            self._draw_cache_key = key
+        screen.blit(self._draw_surface, (tx, ty))
         if self.focused and blink:
-            caret_x = tx + font.size(self.value[start : self.caret])[0]
+            caret_x = tx + self._draw_caret_x
             pygame.draw.line(screen, theme.text, (caret_x, ty + 2), (caret_x, ty + font.get_height() - 2), 1)
 
 
@@ -161,7 +217,7 @@ class Toggle:
         knob_x = track.right - 9 if on else track.x + 9
         knob = theme.bg if on else _mix(theme.text, theme.muted, 0.40)
         pygame.draw.circle(screen, knob, (knob_x, track.centery), 7)
-        label = font.render(self.label, True, theme.text)
+        label = _render_label(font, self.label, theme.text)
         screen.blit(label, (track.right + 10, self.rect.y + (self.rect.height - font.get_height()) // 2))
 
 
@@ -199,7 +255,7 @@ class Dropdown:
         hover = self.rect.collidepoint(mouse) or self.open
         bg = _mix(theme.surface_alt, theme.text, 0.10) if hover else _mix(theme.surface_alt, theme.surface, 0.35)
         _liquid_rect(screen, self.rect, bg, theme.grid, radius=8)
-        label = font.render(f"☰ {self.label}", True, theme.text)
+        label = _render_label(font, f"☰ {self.label}", theme.text)
         screen.blit(label, label.get_rect(center=self.rect.center))
 
     def draw_items(self, screen, theme, font, mouse: tuple[int, int]) -> None:
@@ -209,5 +265,5 @@ class Dropdown:
             hover = rect.collidepoint(mouse)
             fill = _mix(theme.surface, theme.accent, 0.18) if hover else _mix(theme.surface, theme.bg, 0.10)
             _liquid_rect(screen, rect, fill, theme.grid, radius=6, shadow=False)
-            text = font.render(label, True, theme.text)
+            text = _render_label(font, label, theme.text)
             screen.blit(text, (rect.x + 10, rect.y + (rect.height - font.get_height()) // 2))

@@ -93,3 +93,39 @@ def test_remote_telemetry_updates_agent_metrics() -> None:
 def test_auth_headers_support_oauth_and_login() -> None:
     assert AuthConfig(oauth_token="secret").headers()["Authorization"] == "Bearer secret"
     assert AuthConfig(username="u", password="p").headers()["Authorization"].startswith("Basic ")
+
+
+def test_scheduler_skips_sorting_when_no_agent_is_free(monkeypatch) -> None:
+    import watchtower.simulation as simulation_module
+
+    simulation = SimulationState()
+    for agent_id in list(simulation.agents):
+        simulation.submit_task("busy work", requested_agent_id=agent_id)
+    simulation.update(0.1)
+    assert all(agent.current_task_id is not None for agent in simulation.agents.values())
+    queued = [simulation.submit_task(f"queued {index}") for index in range(50)]
+
+    calls = {"count": 0}
+    real_sorted = sorted
+
+    def counting_sorted(*args, **kwargs):
+        calls["count"] += 1
+        return real_sorted(*args, **kwargs)
+
+    # Shadow the builtin inside the module so only simulation.py's sorts count,
+    # and exercise the scheduler directly (update() also sorts in
+    # _prune_finished, which is out of scope for this guard).
+    monkeypatch.setattr(simulation_module, "sorted", counting_sorted, raising=False)
+
+    simulation._assign_waiting_tasks()
+    assert calls["count"] == 0  # all agents busy: no filter/sort work at all
+    assert all(task.status is TaskStatus.SUBMITTED for task in queued)
+
+    # Freeing an agent resumes normal routing on the next tick.
+    freed = next(iter(simulation.agents.values()))
+    simulation.tasks[freed.current_task_id].mark_progress(1.0)
+    freed.current_task_id = None
+    simulation.update(0.1)
+    assert calls["count"] > 0
+    assert freed.current_task_id is not None
+    assert simulation.tasks[freed.current_task_id] in queued
