@@ -36,11 +36,12 @@ Tests: `SDL_VIDEODRIVER=dummy WATCHTOWER_NO_AUTOSAVE=1 .venv/bin/python -m pytes
 | Date | Commit | Median ms/frame | Notes |
 |------|--------|-----------------|-------|
 | 2026-07-01 | 4e23a38 (master) | 2.4616 | medians [2.4616, 2.4769, 2.4819]; 64 tests green |
-| 2026-07-01 | claude/improvements P1 | **1.1219** | −54.4% vs 4e23a38; medians [1.2522, 1.1219, 1.1269]; 64 tests green; pixel-parity exact both themes |
+| 2026-07-01 | claude/improvements P1 | 1.1219 | −54.4% vs 4e23a38; medians [1.2522, 1.1219, 1.1269]; 64 tests green; pixel-parity exact both themes |
+| 2026-07-01 | claude/improvements P2 | **0.8709** | −22.4% vs P1 (−64.6% cumulative); medians [0.8709, 0.8848, 0.8776]; caches stable at 11+5 entries over 200 frames; pixel-parity exact both themes |
 
 ## Loop state
 
-- Items completed this run: 1 / 10
+- Items completed this run: 2 / 10
 - Consecutive blocks: 0
 
 ---
@@ -74,8 +75,14 @@ already invalidate via the existing cache key.
 resize re-render chrome correctly in both themes; flash message still updates
 immediately; tests green.
 
-### 2. [ ] P2 · Cache SRCALPHA shadow/glow surfaces instead of allocating per call
-**Status:** todo · **Type:** perf · **Impact:** high · **Risk:** low · **Files:** `watchtower/ui.py`, `watchtower/widgets.py`
+### 2. [x] P2 · Cache SRCALPHA shadow/glow surfaces instead of allocating per call
+**Status:** awaiting-review · **Type:** perf · **Impact:** high · **Risk:** low · **Files:** `watchtower/ui.py`, `watchtower/widgets.py`
+
+> **Result (machine criteria met):** benchmark 1.1219 → 0.8709 ms/frame (−22.4%;
+> −64.6% cumulative vs master); caches stable at 11 rect + 5 glow entries across
+> 200 frames (zero per-frame Surface allocations on hits); deterministic frame
+> md5 identical to the original pre-P1 hashes in BOTH themes; 64 tests green.
+> Shared factory `widgets.rounded_alpha_surface` used by ui and widgets.
 
 `_draw_liquid_rect` (ui.py:1270-1277) allocates a fresh SRCALPHA surface, rasterizes
 a rounded rect, and blits — twice (shadow + glow) — on every call (~16-17 calls/frame;

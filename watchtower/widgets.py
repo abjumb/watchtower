@@ -18,10 +18,37 @@ def _mix(a: tuple[int, int, int], b: tuple[int, int, int], t: float) -> tuple[in
     return tuple(int(x + (y - x) * t) for x, y in zip(a, b))
 
 
+_ALPHA_CACHE: dict[tuple, pygame.Surface] = {}
+_ALPHA_CACHE_MAX = 64
+
+
+def rounded_alpha_surface(
+    size: tuple[int, int],
+    rect: tuple[int, int, int, int],
+    radius: int,
+    rgba: tuple[int, int, int, int],
+) -> pygame.Surface:
+    """Cached SRCALPHA surface with one rounded rect rasterized onto it.
+
+    Shadow/glow bitmaps depend only on geometry + color, so render each distinct
+    one once and blit it many times. Callers must treat the result as immutable.
+    The distinct-key set is small and layout-stable; on overflow the cache is
+    simply cleared and rebuilt within a frame.
+    """
+    key = (*size, *rect, radius, rgba)
+    surface = _ALPHA_CACHE.get(key)
+    if surface is None:
+        if len(_ALPHA_CACHE) >= _ALPHA_CACHE_MAX:
+            _ALPHA_CACHE.clear()
+        surface = pygame.Surface(size, pygame.SRCALPHA)
+        pygame.draw.rect(surface, rgba, pygame.Rect(rect), border_radius=radius)
+        _ALPHA_CACHE[key] = surface
+    return surface
+
+
 def _liquid_rect(screen, rect: pygame.Rect, fill, border, radius: int = 8, shadow: bool = True) -> None:
     if shadow:
-        shadow_surface = pygame.Surface((rect.width + 12, rect.height + 12), pygame.SRCALPHA)
-        pygame.draw.rect(shadow_surface, (0, 0, 0, 80), pygame.Rect(6, 7, rect.width, rect.height), border_radius=radius)
+        shadow_surface = rounded_alpha_surface((rect.width + 12, rect.height + 12), (6, 7, rect.width, rect.height), radius, (0, 0, 0, 80))
         screen.blit(shadow_surface, (rect.x - 6, rect.y - 5))
     pygame.draw.rect(screen, fill, rect, border_radius=radius)
     highlight = _mix(fill, (255, 255, 255), 0.12)

@@ -24,7 +24,7 @@ from watchtower.models import (
 )
 from watchtower.persistence import export_task_text, load_session, save_session
 from watchtower.simulation import WORLD_HEIGHT, WORLD_WIDTH, SimulationState
-from watchtower.widgets import Button, Dropdown, TextInput, Toggle
+from watchtower.widgets import Button, Dropdown, TextInput, Toggle, rounded_alpha_surface
 
 
 LEFT_PANEL_WIDTH = 236
@@ -1001,10 +1001,7 @@ class WatchtowerApp:
         if agent.status is AgentStatus.WORKING:
             bob = int(round(2.5 * math.sin(self.simulation.elapsed_seconds * 6 + x)))
         cy = y + bob
-        glow = pygame.Surface((92, 92), pygame.SRCALPHA)
-        pygame.draw.circle(glow, (*color, 42), (46, 46), 38)
-        pygame.draw.circle(glow, (*color, 18), (46, 46), 45)
-        self.screen.blit(glow, (x - 46, cy - 46))
+        self.screen.blit(_agent_glow_surface(color), (x - 46, cy - 46))
         pygame.draw.circle(self.screen, _blend(color, theme.bg, 0.55), (x, cy), 31)
         if agent.profile.id == self.selected_agent_id:
             pygame.draw.circle(self.screen, _blend(theme.text, color, 0.18), (x, cy), 35, width=2)
@@ -1287,12 +1284,10 @@ class WatchtowerApp:
         fill = fill or self.theme.surface
         border = border or self.theme.grid
         if shadow:
-            shadow_surface = pygame.Surface((rect.width + 18, rect.height + 18), pygame.SRCALPHA)
-            pygame.draw.rect(shadow_surface, (0, 0, 0, 110), pygame.Rect(9, 10, rect.width, rect.height), border_radius=radius)
+            shadow_surface = rounded_alpha_surface((rect.width + 18, rect.height + 18), (9, 10, rect.width, rect.height), radius, (0, 0, 0, 110))
             target.blit(shadow_surface, (rect.x - 9, rect.y - 8))
         if glow:
-            glow_surface = pygame.Surface((rect.width + 16, rect.height + 16), pygame.SRCALPHA)
-            pygame.draw.rect(glow_surface, (*glow, 30), pygame.Rect(4, 4, rect.width + 8, rect.height + 8), border_radius=radius + 5)
+            glow_surface = rounded_alpha_surface((rect.width + 16, rect.height + 16), (4, 4, rect.width + 8, rect.height + 8), radius + 5, (*glow, 30))
             target.blit(glow_surface, (rect.x - 8, rect.y - 8))
         pygame.draw.rect(target, fill, rect, border_radius=radius)
         sheen = _blend(fill, self.theme.text, 0.12)
@@ -1656,6 +1651,27 @@ class WatchtowerApp:
             return "auto"
         agent = self.simulation.agents.get(agent_id)
         return agent.profile.display_name if agent else agent_id
+
+
+_AGENT_GLOW_CACHE: dict[tuple[int, int, int], pygame.Surface] = {}
+_AGENT_GLOW_CACHE_MAX = 32
+
+
+def _agent_glow_surface(color: tuple[int, int, int]) -> pygame.Surface:
+    """Cached per-accent-color agent glow (two alpha circles on 92x92).
+
+    The bitmap depends only on the resolved RGB, so each color rasterizes once
+    instead of once per agent per frame. Treat the result as immutable.
+    """
+    surface = _AGENT_GLOW_CACHE.get(color)
+    if surface is None:
+        if len(_AGENT_GLOW_CACHE) >= _AGENT_GLOW_CACHE_MAX:
+            _AGENT_GLOW_CACHE.clear()
+        surface = pygame.Surface((92, 92), pygame.SRCALPHA)
+        pygame.draw.circle(surface, (*color, 42), (46, 46), 38)
+        pygame.draw.circle(surface, (*color, 18), (46, 46), 45)
+        _AGENT_GLOW_CACHE[color] = surface
+    return surface
 
 
 def _hex_to_rgb(value: str, fallback: tuple[int, int, int]) -> tuple[int, int, int]:
