@@ -155,7 +155,7 @@ class WatchtowerApp:
         self.task_scroll = 0
         self.task_cursor = 0
         self.compare_scroll = 0
-        self.effects: list[list[float]] = []
+        self.effects: list[list] = []  # [x, y, age, ttl, (r, g, b)]
         self.metric_history: dict[str, deque[float]] = {}
         self._spark_timer = 0.0
         self._autosave_timer = 0.0
@@ -708,15 +708,17 @@ class WatchtowerApp:
         for task in self.simulation.tasks.values():
             if task.status is TaskStatus.COMPLETE and task.id not in self._completed_seen:
                 self._completed_seen.add(task.id)
-                center = self._effect_origin(task)
-                self.effects.append([float(center[0]), float(center[1]), 0.0, 0.9])
+                center, color = self._effect_origin(task)
+                self.effects.append([float(center[0]), float(center[1]), 0.0, 0.9, color])
         self._completed_seen &= set(self.simulation.tasks)
 
-    def _effect_origin(self, task: SubmittedTask) -> tuple[int, int]:
+    def _effect_origin(self, task: SubmittedTask) -> tuple[tuple[int, int], tuple[int, int, int]]:
+        """Where a completion effect spawns, and the accent color it bursts in."""
         agent = self.simulation.agents.get(task.assigned_agent_id or task.requested_agent_id or "")
         if agent:
-            return self._agent_screen_position(agent)
-        return (WORLD_X + WORLD_WIDTH // 2, WORLD_Y + WORLD_HEIGHT // 2)
+            color = _hex_to_rgb(agent.profile.accent_color, self.theme.accent)
+            return self._agent_screen_position(agent), color
+        return (WORLD_X + WORLD_WIDTH // 2, WORLD_Y + WORLD_HEIGHT // 2), self.theme.success
 
     def _update_effects(self, dt: float) -> None:
         for effect in self.effects:
@@ -1056,11 +1058,22 @@ class WatchtowerApp:
             self._station_hits.append((rect, task.id))
 
     def _draw_effects(self) -> None:
-        for x, y, age, ttl in self.effects:
+        theme = self.theme
+        for x, y, age, ttl, color in self.effects:
             progress = age / ttl
-            radius = int(20 + 36 * progress)
-            color = _blend(self.theme.success, self.theme.bg, progress)
-            pygame.draw.circle(self.screen, color, (int(x), int(y)), radius, width=2)
+            eased = 1 - (1 - progress) ** 3
+            fade = _blend(color, theme.bg, progress)
+            pygame.draw.circle(self.screen, fade, (int(x), int(y)), int(20 + 36 * eased), width=2)
+            # Deterministic burst: angles seeded by spawn position so
+            # simultaneous effects don't look cloned.
+            base_angle = (x * 0.7 + y * 0.3) % (2 * math.pi)
+            dot_radius = max(1, int(3.5 * (1 - progress)))
+            distance = 14 + 46 * eased
+            for index in range(9):
+                angle = base_angle + index * (2 * math.pi / 9)
+                px = int(x + distance * math.cos(angle))
+                py = int(y + distance * math.sin(angle))
+                pygame.draw.circle(self.screen, fade, (px, py), dot_radius)
 
     def _draw_panel(self, snapshot, provider_snapshot) -> None:
         theme = self.theme

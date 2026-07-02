@@ -49,8 +49,10 @@ Tests: `SDL_VIDEODRIVER=dummy WATCHTOWER_NO_AUTOSAVE=1 .venv/bin/python -m pytes
 
 ## Loop state
 
-- Items completed this run: 7 / 10
+- Items completed this run: 8 / 10
 - Consecutive blocks: 0
+- **Visual queue gated:** V1 (item 8) is awaiting human review — per contract the
+  loop does not start another visual item until it is approved.
 
 ---
 
@@ -224,8 +226,17 @@ pygame-free.
 in `_assign_waiting_tasks` when no agent is free under load; benchmark median
 improves or holds; routing behavior identical.
 
-### 8. [ ] V1 · Upgrade task-completion effect to an eased particle burst in agent color
-**Status:** todo · **Type:** visual · **Impact:** high · **Risk:** low · **Files:** `watchtower/ui.py`
+### 8. [x] V1 · Upgrade task-completion effect to an eased particle burst in agent color
+**Status:** awaiting-review · **Type:** visual · **Impact:** high · **Risk:** low · **Files:** `watchtower/ui.py`
+
+> **Result (machine criteria met — needs human approval):** effect now stores the
+> agent's accent color at spawn (`_effect_origin` returns position + color) and
+> draws an ease-out ring (1−(1−t)³) plus 9 deterministic radiating dots, fading
+> toward theme.bg. Before/after screenshots in BOTH themes:
+> `screenshots/item-08/{before,after}_{dark,light}.png` (same deterministic
+> frame, 3 effects mid-flight). Effects still expire after TTL (verified drained
+> to 0); 65 tests green; benchmark unaffected (0.7569). **Human: eyeball the
+> after shots and flip to done to unlock the next visual item.**
 
 The completion payoff is a single 2px circle outline growing linearly (spawn
 ui.py:705-711; draw 1062-1067) — reads as a debug marker, not a reward. Store the
