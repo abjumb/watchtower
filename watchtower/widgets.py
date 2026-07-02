@@ -96,6 +96,11 @@ class TextInput:
     focused: bool = False
     caret: int = 0
     max_len: int = 400
+    # Draw cache: the caret-scroll loops cost O(len) font.size calls per frame,
+    # so scroll/surface/caret-x are recomputed only when this key changes.
+    _draw_cache_key: tuple | None = field(default=None, init=False, repr=False)
+    _draw_surface: pygame.Surface | None = field(default=None, init=False, repr=False)
+    _draw_caret_x: int = field(default=0, init=False, repr=False)
 
     def set(self, text: str) -> None:
         self.value = text[: self.max_len]
@@ -148,21 +153,29 @@ class TextInput:
         ty = self.rect.y + (self.rect.height - font.get_height()) // 2
         tx = self.rect.x + 10
         if not self.value:
-            placeholder = font.render(self.placeholder, True, theme.muted)
-            screen.blit(placeholder, (tx, ty))
+            key = ("placeholder", font, self.placeholder, theme.name)
+            if self._draw_cache_key != key:
+                self._draw_surface = font.render(self.placeholder, True, theme.muted)
+                self._draw_cache_key = key
+            screen.blit(self._draw_surface, (tx, ty))
             if self.focused and blink:
                 pygame.draw.line(screen, theme.text, (tx, ty + 2), (tx, ty + font.get_height() - 2), 1)
             return
-        # Scroll the text so the caret stays visible inside the field.
-        start = 0
-        while start < self.caret and font.size(self.value[start : self.caret])[0] > inner_w:
-            start += 1
-        display = self.value[start:]
-        while display and font.size(display)[0] > inner_w:
-            display = display[:-1]
-        screen.blit(font.render(display, True, theme.text), (tx, ty))
+        key = ("value", font, self.value, self.caret, inner_w, theme.name)
+        if self._draw_cache_key != key:
+            # Scroll the text so the caret stays visible inside the field.
+            start = 0
+            while start < self.caret and font.size(self.value[start : self.caret])[0] > inner_w:
+                start += 1
+            display = self.value[start:]
+            while display and font.size(display)[0] > inner_w:
+                display = display[:-1]
+            self._draw_surface = font.render(display, True, theme.text)
+            self._draw_caret_x = font.size(self.value[start : self.caret])[0]
+            self._draw_cache_key = key
+        screen.blit(self._draw_surface, (tx, ty))
         if self.focused and blink:
-            caret_x = tx + font.size(self.value[start : self.caret])[0]
+            caret_x = tx + self._draw_caret_x
             pygame.draw.line(screen, theme.text, (caret_x, ty + 2), (caret_x, ty + font.get_height() - 2), 1)
 
 

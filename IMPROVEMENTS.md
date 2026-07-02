@@ -41,9 +41,11 @@ Tests: `SDL_VIDEODRIVER=dummy WATCHTOWER_NO_AUTOSAVE=1 .venv/bin/python -m pytes
 | 2026-07-01 | claude/improvements P3 | 0.7731 | −11.2% vs P2 (−68.6% cumulative); medians [0.7731, 0.7758, 0.7774]; 0 text-cache misses on identical redraw (42 entries); pixel-parity exact both themes |
 | 2026-07-01 | claude/improvements P4 | **0.7796** | base scene unchanged — same-conditions A/B: P3 code = 0.7791 vs P4 = 0.7796 (machine drifted ~1% warmer since the P3 row). P4's target is the overlay path: detail overlay w/ 4000-char body now +1.06 ms over base (was ~+3.6 ms), wrap cache stable at 2 entries over 300 frames |
 
+| 2026-07-01 | claude/improvements P5 | **0.7655** | −1.8% vs P4 (placeholder render was the only base-path cost); medians [0.7655, 0.7655, 0.77]; TextInput: 356 → 0 font.size calls on repeat frame with 400-char value; pixel-parity exact both themes |
+
 ## Loop state
 
-- Items completed this run: 4 / 10
+- Items completed this run: 5 / 10
 - Consecutive blocks: 0
 
 ---
@@ -145,8 +147,17 @@ open on a 4000-char response, frame time within ~1 ms of base (vs ~+3.6 ms); sec
 consecutive overlay frame performs 0 `font.size` calls in the wrap path; wrapped
 line output byte-identical for same inputs; tests green.
 
-### 5. [ ] P5 · Cache TextInput scroll/render work (per-frame `font.size` loops)
-**Status:** todo · **Type:** perf · **Impact:** medium · **Risk:** low · **Files:** `watchtower/widgets.py`, `watchtower/ui.py`
+### 5. [x] P5 · Cache TextInput scroll/render work (per-frame `font.size` loops)
+**Status:** awaiting-review · **Type:** perf · **Impact:** medium · **Risk:** low · **Files:** `watchtower/widgets.py`
+
+> **Result (machine criteria met):** with a 400-char value and caret at end,
+> repeat frame performs 0 font.size + 0 font.render calls (was 356 + 1);
+> editing the value recomputes on the next draw as required; placeholder render
+> also cached (that path runs every frame in the base scene: benchmark
+> 0.7796 → 0.7655, −1.8%); caret blink stays live; scroll/caret placement
+> byte-identical (same algorithm, computed once per key); frame md5 identical
+> to pre-P1 baseline in BOTH themes; 64 tests green. ui.py needed no change —
+> the placeholder f-string rebuild is nanosecond-scale; the render was the cost.
 
 `TextInput.draw` (widgets.py:116-139) runs every frame for the prompt box: renders
 the placeholder each frame (line 124; ui.py:1147 also rebuilds the placeholder
