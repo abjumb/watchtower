@@ -43,9 +43,11 @@ Tests: `SDL_VIDEODRIVER=dummy WATCHTOWER_NO_AUTOSAVE=1 .venv/bin/python -m pytes
 
 | 2026-07-01 | claude/improvements P5 | **0.7655** | −1.8% vs P4 (placeholder render was the only base-path cost); medians [0.7655, 0.7655, 0.77]; TextInput: 356 → 0 font.size calls on repeat frame with 400-char value; pixel-parity exact both themes |
 
+| 2026-07-01 | claude/improvements P6 | **0.7642** | holds vs P5 (widget labels were ~5 renders/frame); medians [0.7642, 0.7674, 0.8219]; label cache stable at 5 entries over 100 frames; toolbar rebuilt only on resize (verified at 1500×900); pixel-parity exact both themes |
+
 ## Loop state
 
-- Items completed this run: 5 / 10
+- Items completed this run: 6 / 10
 - Consecutive blocks: 0
 
 ---
@@ -173,8 +175,16 @@ must still repaint).
 calls in TextInput.draw; display/caret placement identical for same state in both
 themes; typing updates on next frame; tests green.
 
-### 6. [ ] P6 · Stop rebuilding toolbar Buttons per frame; cache widget label surfaces
-**Status:** todo · **Type:** perf · **Impact:** medium · **Risk:** low · **Files:** `watchtower/ui.py`, `watchtower/widgets.py`
+### 6. [x] P6 · Stop rebuilding toolbar Buttons per frame; cache widget label surfaces
+**Status:** awaiting-review · **Type:** perf · **Impact:** medium · **Risk:** low · **Files:** `watchtower/ui.py`, `watchtower/widgets.py`
+
+> **Result (machine criteria met):** toolbar Button list memoized on
+> (screen_width, screen_height) — same list object returned across frames,
+> rebuilt correctly on resize (verified: toolbar_y 780 at 1500×900, callbacks
+> intact); all four widget label render sites (Button/Toggle/Dropdown
+> button+items) routed through a bounded label cache, stable at 5 entries over
+> 100 idle frames (0 font calls on repeat frames); benchmark holds at 0.7642;
+> frame md5 identical to pre-P1 baseline in BOTH themes; 64 tests green.
 
 `_draw_input` calls `_toolbar_buttons()` every frame (ui.py:1154) reconstructing 4
 Button dataclasses + `font.size` per label (ui.py:762-776); `Button.draw`,

@@ -164,6 +164,8 @@ class WatchtowerApp:
         self._panel_task_hits: list[tuple[pygame.Rect, str]] = []
         self._bg_surface: pygame.Surface | None = None
         self._bg_cache_key: tuple[int, int, str] | None = None
+        self._toolbar_cache: list[Button] | None = None
+        self._toolbar_cache_key: tuple[int, int] | None = None
         self.running = True
         if not web_mode and not os.getenv("WATCHTOWER_NO_AUTOSAVE"):
             self._restore_autosave()
@@ -760,6 +762,11 @@ class WatchtowerApp:
         self.menu.rect = pygame.Rect(16, self.screen_height - 120, 120, 26)
 
     def _toolbar_buttons(self) -> list[Button]:
+        # Rebuilt only on resize: rects depend solely on the window size, and
+        # the labels/callbacks are constant.
+        key = (self.screen_width, self.screen_height)
+        if self._toolbar_cache_key == key and self._toolbar_cache is not None:
+            return self._toolbar_cache
         toolbar_y = self.screen_height - 120
         x = 16 + self.menu.rect.width + 8
         specs = [
@@ -773,6 +780,8 @@ class WatchtowerApp:
             width = max(72, self.small_font.size(label)[0] + 22)
             buttons.append(Button(label, pygame.Rect(x, toolbar_y, width, 26), callback, style="ghost"))
             x += width + 8
+        self._toolbar_cache = buttons
+        self._toolbar_cache_key = key
         return buttons
 
     # ----- toolbar / menu actions -------------------------------------------

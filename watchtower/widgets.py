@@ -46,6 +46,22 @@ def rounded_alpha_surface(
     return surface
 
 
+_LABEL_CACHE: dict[tuple, pygame.Surface] = {}
+_LABEL_CACHE_MAX = 256
+
+
+def _render_label(font, text: str, color: tuple[int, int, int]) -> pygame.Surface:
+    """Cached font.render for widget labels (constant strings, per-frame draws)."""
+    key = (font, text, color)
+    surface = _LABEL_CACHE.get(key)
+    if surface is None:
+        if len(_LABEL_CACHE) >= _LABEL_CACHE_MAX:
+            _LABEL_CACHE.clear()
+        surface = font.render(text, True, color)
+        _LABEL_CACHE[key] = surface
+    return surface
+
+
 def _liquid_rect(screen, rect: pygame.Rect, fill, border, radius: int = 8, shadow: bool = True) -> None:
     if shadow:
         shadow_surface = rounded_alpha_surface((rect.width + 12, rect.height + 12), (6, 7, rect.width, rect.height), radius, (0, 0, 0, 80))
@@ -84,7 +100,7 @@ class Button:
             fg = theme.bg
             border = _mix(base, theme.text, 0.25)
         _liquid_rect(screen, self.rect, bg, border, radius=8)
-        label = font.render(self.label, True, fg)
+        label = _render_label(font, self.label, fg)
         screen.blit(label, label.get_rect(center=self.rect.center))
 
 
@@ -201,7 +217,7 @@ class Toggle:
         knob_x = track.right - 9 if on else track.x + 9
         knob = theme.bg if on else _mix(theme.text, theme.muted, 0.40)
         pygame.draw.circle(screen, knob, (knob_x, track.centery), 7)
-        label = font.render(self.label, True, theme.text)
+        label = _render_label(font, self.label, theme.text)
         screen.blit(label, (track.right + 10, self.rect.y + (self.rect.height - font.get_height()) // 2))
 
 
@@ -239,7 +255,7 @@ class Dropdown:
         hover = self.rect.collidepoint(mouse) or self.open
         bg = _mix(theme.surface_alt, theme.text, 0.10) if hover else _mix(theme.surface_alt, theme.surface, 0.35)
         _liquid_rect(screen, self.rect, bg, theme.grid, radius=8)
-        label = font.render(f"☰ {self.label}", True, theme.text)
+        label = _render_label(font, f"☰ {self.label}", theme.text)
         screen.blit(label, label.get_rect(center=self.rect.center))
 
     def draw_items(self, screen, theme, font, mouse: tuple[int, int]) -> None:
@@ -249,5 +265,5 @@ class Dropdown:
             hover = rect.collidepoint(mouse)
             fill = _mix(theme.surface, theme.accent, 0.18) if hover else _mix(theme.surface, theme.bg, 0.10)
             _liquid_rect(screen, rect, fill, theme.grid, radius=6, shadow=False)
-            text = font.render(label, True, theme.text)
+            text = _render_label(font, label, theme.text)
             screen.blit(text, (rect.x + 10, rect.y + (rect.height - font.get_height()) // 2))
