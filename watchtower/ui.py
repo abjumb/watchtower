@@ -166,6 +166,8 @@ class WatchtowerApp:
         self._bg_cache_key: tuple[int, int, str] | None = None
         self._toolbar_cache: list[Button] | None = None
         self._toolbar_cache_key: tuple[int, int] | None = None
+        self._render_pos: dict[str, list[float]] = {}
+        self._render_time = 0.0
         self.running = True
         if not web_mode and not os.getenv("WATCHTOWER_NO_AUTOSAVE"):
             self._restore_autosave()
@@ -717,6 +719,10 @@ class WatchtowerApp:
         agent = self.simulation.agents.get(task.assigned_agent_id or task.requested_agent_id or "")
         if agent:
             color = _hex_to_rgb(agent.profile.accent_color, self.theme.accent)
+            pos = self._render_pos.get(agent.profile.id)
+            if pos is not None:
+                # Spawn on the eased (drawn) agent, not the raw sim position.
+                return (int(round(pos[0])), int(round(pos[1]))), color
             return self._agent_screen_position(agent), color
         return (WORLD_X + WORLD_WIDTH // 2, WORLD_Y + WORLD_HEIGHT // 2), self.theme.success
 
@@ -734,6 +740,7 @@ class WatchtowerApp:
             self.inspect_agent_id = None
         self._draw_app_background()
         snapshot = self.simulation.snapshot()
+        self._smooth_agent_positions(snapshot)
         self._draw_todo_panel(snapshot.tasks)
         self._draw_world()
         for agent in snapshot.agents:
@@ -1004,20 +1011,54 @@ class WatchtowerApp:
         # (_draw_static_chrome); only the live flash message is drawn here.
         self._text(self.flash_message, WORLD_X + 20, 60, self.small_font, self.theme.muted)
 
+    def _smooth_agent_positions(self, snapshot) -> None:
+        """Ease rendered agent positions toward their sim positions.
+
+        Purely render-side: the simulation stays authoritative for hit-testing
+        and routing. dt derives from the sim clock so every frame recipe
+        (run, run_async, benchmarks) gets identical easing, and a redraw with
+        no sim update leaves positions untouched.
+        """
+        frame_dt = max(0.0, snapshot.elapsed_seconds - self._render_time)
+        self._render_time = snapshot.elapsed_seconds
+        blend = min(1.0, frame_dt * 8)
+        alive = set()
+        for agent in snapshot.agents:
+            alive.add(agent.profile.id)
+            target = self._agent_screen_position(agent)
+            pos = self._render_pos.get(agent.profile.id)
+            if pos is None:
+                self._render_pos[agent.profile.id] = [float(target[0]), float(target[1])]
+                continue
+            pos[0] += (target[0] - pos[0]) * blend
+            pos[1] += (target[1] - pos[1]) * blend
+        for agent_id in list(self._render_pos):
+            if agent_id not in alive:
+                del self._render_pos[agent_id]
+
     def _draw_agent(self, agent: AgentState) -> None:
         theme = self.theme
-        x, y = self._agent_screen_position(agent)
+        pos = self._render_pos.get(agent.profile.id)
+        if pos is None:
+            x, y = self._agent_screen_position(agent)
+        else:
+            x, y = int(round(pos[0])), int(round(pos[1]))
         color = _hex_to_rgb(agent.profile.accent_color, theme.accent)
         bob = 0
         if agent.status is AgentStatus.WORKING:
             bob = int(round(2.5 * math.sin(self.simulation.elapsed_seconds * 6 + x)))
+        breath = 0.0
+        if agent.status is AgentStatus.IDLE:
+            # Subtle body pulse; the cached glow stays a fixed size (P2) so
+            # only the directly-drawn circles breathe.
+            breath = 1.2 * math.sin(self.simulation.elapsed_seconds * 2.2 + x * 0.05)
         cy = y + bob
         self.screen.blit(_agent_glow_surface(color), (x - 46, cy - 46))
         pygame.draw.circle(self.screen, _blend(color, theme.bg, 0.55), (x, cy), 31)
         if agent.profile.id == self.selected_agent_id:
             pygame.draw.circle(self.screen, _blend(theme.text, color, 0.18), (x, cy), 35, width=2)
-        pygame.draw.circle(self.screen, color, (x, cy), 24)
-        pygame.draw.circle(self.screen, _blend(theme.bg, theme.surface, 0.30), (x, cy), 17)
+        pygame.draw.circle(self.screen, color, (x, cy), int(round(24 + breath)))
+        pygame.draw.circle(self.screen, _blend(theme.bg, theme.surface, 0.30), (x, cy), int(round(17 + breath * 0.7)))
         self._draw_face(x, cy, agent.status, color)
         name = _render_text(self.small_font, agent.profile.display_name, theme.text)
         self.screen.blit(name, name.get_rect(center=(x, cy + 38)))

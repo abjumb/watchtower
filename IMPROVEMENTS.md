@@ -49,10 +49,11 @@ Tests: `SDL_VIDEODRIVER=dummy WATCHTOWER_NO_AUTOSAVE=1 .venv/bin/python -m pytes
 
 ## Loop state
 
-- Items completed this run: 8 / 10
+- Items completed this run: 9 / 10
 - Consecutive blocks: 0
-- **Visual queue gated:** V1 (item 8) is awaiting human review — per contract the
-  loop does not start another visual item until it is approved.
+- **Visual queue gated:** V2 (item 9) is awaiting human review — per contract the
+  loop does not start another visual item until it is approved. (V1 approved
+  in-session 2026-07-01.)
 
 ---
 
@@ -227,7 +228,7 @@ in `_assign_waiting_tasks` when no agent is free under load; benchmark median
 improves or holds; routing behavior identical.
 
 ### 8. [x] V1 · Upgrade task-completion effect to an eased particle burst in agent color
-**Status:** awaiting-review · **Type:** visual · **Impact:** high · **Risk:** low · **Files:** `watchtower/ui.py`
+**Status:** done (human-approved 2026-07-01, in-session) · **Type:** visual · **Impact:** high · **Risk:** low · **Files:** `watchtower/ui.py`
 
 > **Result (machine criteria met — needs human approval):** effect now stores the
 > agent's accent color at spawn (`_effect_origin` returns position + color) and
@@ -249,8 +250,20 @@ deterministic radiating dots fading out. Both themes via existing blend against
 effects list still empties after TTL; before/after screenshots mid-effect in both
 themes under `screenshots/item-08/`; → `awaiting-review`; human approval.
 
-### 9. [ ] V2 · Render-side motion easing + idle breathing for agents
-**Status:** todo · **Type:** visual · **Impact:** high · **Risk:** medium · **Files:** `watchtower/ui.py`
+### 9. [x] V2 · Render-side motion easing + idle breathing for agents
+**Status:** awaiting-review · **Type:** visual · **Impact:** high · **Risk:** medium · **Files:** `watchtower/ui.py`
+
+> **Result (machine criteria met — needs human approval):** rendered agent
+> positions ease toward sim positions (`_smooth_agent_positions`, exp smoothing
+> dt·8, dt from the sim clock so all frame recipes behave identically); idle
+> agents get a ±1.2 px body pulse (cached glow stays fixed-size per the P2
+> caveat); completion bursts spawn on the eased position. Sim stays authoritative
+> for hit-testing — drag test green. Verified: translation-cancelled crops of an
+> idle agent 0.7 s apart differ (breathing) while status stays idle; 65 tests
+> green; benchmark within noise (0.7762). Screenshots (stills can't show easing —
+> it's temporal; they confirm nothing broke visually):
+> `screenshots/item-09/{before,after}_{dark,light}.png`. **Human: approve to
+> unlock the next visual item; run the app to feel the motion.**
 
 Agents move at constant velocity and halt instantly (`_move_toward`
 simulation.py:333-340); IDLE agents are static except orbit + blink. Fix entirely
