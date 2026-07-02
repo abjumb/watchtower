@@ -168,6 +168,7 @@ class WatchtowerApp:
         self._toolbar_cache_key: tuple[int, int] | None = None
         self._render_pos: dict[str, list[float]] = {}
         self._render_time = 0.0
+        self._mouse: tuple[int, int] = (0, 0)
         self.running = True
         if not web_mode and not os.getenv("WATCHTOWER_NO_AUTOSAVE"):
             self._restore_autosave()
@@ -739,6 +740,7 @@ class WatchtowerApp:
         if self.inspect_agent_id and self.inspect_agent_id not in self.simulation.agents:
             self.inspect_agent_id = None
         self._draw_app_background()
+        self._mouse = pygame.mouse.get_pos()
         snapshot = self.simulation.snapshot()
         self._smooth_agent_positions(snapshot)
         self._draw_todo_panel(snapshot.tasks)
@@ -1053,11 +1055,19 @@ class WatchtowerApp:
             # only the directly-drawn circles breathe.
             breath = 1.2 * math.sin(self.simulation.elapsed_seconds * 2.2 + x * 0.05)
         cy = y + bob
+        # Hover lifts the halo/body toward theme.text, matching the widget
+        # toolkit's hover recipe (0.10 fill / 0.16 border).
+        hovered = (self._mouse[0] - x) ** 2 + (self._mouse[1] - cy) ** 2 <= 31 * 31
+        halo = _blend(color, theme.bg, 0.55)
+        body = color
+        if hovered:
+            halo = _blend(halo, theme.text, 0.16)
+            body = _blend(color, theme.text, 0.10)
         self.screen.blit(_agent_glow_surface(color), (x - 46, cy - 46))
-        pygame.draw.circle(self.screen, _blend(color, theme.bg, 0.55), (x, cy), 31)
+        pygame.draw.circle(self.screen, halo, (x, cy), 31)
         if agent.profile.id == self.selected_agent_id:
             pygame.draw.circle(self.screen, _blend(theme.text, color, 0.18), (x, cy), 35, width=2)
-        pygame.draw.circle(self.screen, color, (x, cy), int(round(24 + breath)))
+        pygame.draw.circle(self.screen, body, (x, cy), int(round(24 + breath)))
         pygame.draw.circle(self.screen, _blend(theme.bg, theme.surface, 0.30), (x, cy), int(round(17 + breath * 0.7)))
         self._draw_face(x, cy, agent.status, color)
         name = _render_text(self.small_font, agent.profile.display_name, theme.text)
@@ -1092,7 +1102,12 @@ class WatchtowerApp:
         active = [task for task in tasks if task.status in {TaskStatus.ASSIGNED, TaskStatus.IN_PROGRESS}]
         for index, task in enumerate(active[:5]):
             rect = pygame.Rect(WORLD_X + 84 + index * 145, WORLD_Y + WORLD_HEIGHT - 40, 106, 30)
-            self._draw_liquid_rect(rect, fill=_blend(theme.surface_alt, theme.bg, 0.05), border=_priority_color(task.priority, theme), radius=8, shadow=False)
+            fill = _blend(theme.surface_alt, theme.bg, 0.05)
+            border = _priority_color(task.priority, theme)
+            if rect.collidepoint(self._mouse):
+                fill = _blend(fill, theme.text, 0.10)
+                border = _blend(border, theme.text, 0.16)
+            self._draw_liquid_rect(rect, fill=fill, border=border, radius=8, shadow=False)
             pygame.draw.rect(self.screen, theme.accent, (rect.x, rect.y, int(rect.width * task.progress), 4), border_radius=2)
             label = _render_text(self.small_font, task.id, theme.text)
             self.screen.blit(label, label.get_rect(center=rect.center))
@@ -1127,6 +1142,8 @@ class WatchtowerApp:
             row = self._agent_row_rect(index)
             if agent.profile.id == self.selected_agent_id:
                 self._draw_liquid_rect(row, fill=_blend(theme.surface_alt, color, 0.08), border=color, radius=8, shadow=False)
+            elif row.collidepoint(self._mouse):
+                self._draw_liquid_rect(row, fill=_blend(theme.surface_alt, theme.text, 0.10), border=_blend(theme.grid, theme.text, 0.16), radius=8, shadow=False)
             pygame.draw.circle(self.screen, color, (PANEL_X + 28, y + 9), 7)
             self._text(agent.profile.model_name[:20], PANEL_X + 44, y, self.font, theme.text)
             connection = "live key" if self.model_api.is_configured(agent.profile) else agent.profile.provider
@@ -1169,7 +1186,12 @@ class WatchtowerApp:
             color = theme.success if task.status is TaskStatus.COMPLETE else _priority_color(task.priority, theme)
             if task.status is TaskStatus.FAILED:
                 color = theme.danger
-            self._draw_liquid_rect(rect, fill=_blend(theme.surface_alt, theme.bg, 0.08), border=theme.grid, radius=8, shadow=False)
+            row_fill = _blend(theme.surface_alt, theme.bg, 0.08)
+            row_border = theme.grid
+            if rect.collidepoint(self._mouse):
+                row_fill = _blend(row_fill, theme.text, 0.10)
+                row_border = _blend(row_border, theme.text, 0.16)
+            self._draw_liquid_rect(rect, fill=row_fill, border=row_border, radius=8, shadow=False)
             if absolute_index == self.task_cursor:
                 pygame.draw.rect(self.screen, _blend(theme.text, color, 0.20), rect, width=1, border_radius=8)
             pygame.draw.rect(self.screen, color, (rect.x, rect.y, 4, 50), border_radius=2)
@@ -1664,7 +1686,12 @@ class WatchtowerApp:
     def _draw_todo_card(self, task: SubmittedTask, rect: pygame.Rect, ghost: bool = False) -> None:
         theme = self.theme
         fill = theme.surface_alt if not ghost else _blend(theme.surface_alt, theme.accent, 0.35)
-        self._draw_liquid_rect(rect, fill=_blend(fill, theme.bg, 0.08), border=_priority_color(task.priority, theme), radius=10, shadow=not ghost)
+        card_fill = _blend(fill, theme.bg, 0.08)
+        border = _priority_color(task.priority, theme)
+        if not ghost and rect.collidepoint(self._mouse):
+            card_fill = _blend(card_fill, theme.text, 0.10)
+            border = _blend(border, theme.text, 0.16)
+        self._draw_liquid_rect(rect, fill=card_fill, border=border, radius=10, shadow=not ghost)
         self._text(task.title[:24], rect.x + 10, rect.y + 8, self.small_font, theme.text)
         self._text("grab and drop", rect.x + 10, rect.y + 27, self.small_font, theme.muted)
 

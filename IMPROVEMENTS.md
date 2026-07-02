@@ -49,11 +49,10 @@ Tests: `SDL_VIDEODRIVER=dummy WATCHTOWER_NO_AUTOSAVE=1 .venv/bin/python -m pytes
 
 ## Loop state
 
-- Items completed this run: 9 / 10
+- Items completed this run: 10 / 10 — **HARD STOP reached; loop run complete.**
 - Consecutive blocks: 0
-- **Visual queue gated:** V2 (item 9) is awaiting human review — per contract the
-  loop does not start another visual item until it is approved. (V1 approved
-  in-session 2026-07-01.)
+- V1 approved 2026-07-01; V2 approved 2026-07-02; V3 (item 10) awaiting review.
+- Items 11–14 (V4–V7) remain `todo` — a future `/loop` run picks up from here.
 
 ---
 
@@ -251,7 +250,7 @@ effects list still empties after TTL; before/after screenshots mid-effect in bot
 themes under `screenshots/item-08/`; → `awaiting-review`; human approval.
 
 ### 9. [x] V2 · Render-side motion easing + idle breathing for agents
-**Status:** awaiting-review · **Type:** visual · **Impact:** high · **Risk:** medium · **Files:** `watchtower/ui.py`
+**Status:** done (human-approved 2026-07-02, in-session) · **Type:** visual · **Impact:** high · **Risk:** medium · **Files:** `watchtower/ui.py`
 
 > **Result (machine criteria met — needs human approval):** rendered agent
 > positions ease toward sim positions (`_smooth_agent_positions`, exp smoothing
@@ -278,8 +277,18 @@ Drag-drop hit rects must keep using sim positions (or drop tolerance) so
 agent differ (breathing); before/after screenshots both themes under
 `screenshots/item-09/`; → `awaiting-review`; human approval.
 
-### 10. [ ] V3 · Hover feedback for all clickable game elements
-**Status:** todo · **Type:** visual · **Impact:** high · **Risk:** low · **Files:** `watchtower/ui.py`
+### 10. [x] V3 · Hover feedback for all clickable game elements
+**Status:** awaiting-review · **Type:** visual · **Impact:** high · **Risk:** low · **Files:** `watchtower/ui.py`
+
+> **Result (machine criteria met — needs human approval):** hover cues added to
+> all five hover-dead element kinds — agents (radial hit ≤31px: halo +0.16,
+> body +0.10 toward theme.text), task stations, panel task rows, panel agent
+> rows, and todo cards (rect hits: fill +0.10, border +0.16) — matching the
+> widget-toolkit hover recipe; ghost cards excluded. Mouse cached once per
+> frame (`self._mouse`). Verified: no-hover frame **byte-identical to HEAD** in
+> both themes (same-conditions A/B stash test); 65 tests green; screenshots
+> hovered-vs-not for agent/todo-card/task-row in both themes under
+> `screenshots/item-10/`. **This was item 10/10 — the loop's hard stop.**
 
 Only widget-toolkit buttons have hover states (widgets.py:46-58). Agents, task
 stations, panel task/agent rows, and todo cards are hover-dead. Hit rects already
