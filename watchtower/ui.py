@@ -13,7 +13,15 @@ import pygame
 
 from watchtower.auth import AuthConfig
 from watchtower.data_provider import AgentDataProvider, TelemetryPoller
-from watchtower.integrations import GitHubClient, IntegrationConfig, IntegrationPoller, TodoistClient
+from watchtower.integrations import (
+    REPOS_DIR,
+    GitHubClient,
+    IntegrationConfig,
+    IntegrationPoller,
+    TodoistClient,
+    completion_comment,
+    repo_context,
+)
 from watchtower.model_api import ModelApiClient, ModelCallResult
 from watchtower.models import (
     AgentProfile,
@@ -131,6 +139,7 @@ class WatchtowerApp:
         self.external_links: dict[str, tuple[str, str]] = {}
         self._integration_messages: queue.Queue[str] = queue.Queue()
         self._integration_error: str | None = None
+        self._external_completed_seen: set[str] = set()
         self.text_input = TextInput(pygame.Rect(16, 0, 200, 52), focused=True)
         self.add_agent_inputs = {
             "id": TextInput(pygame.Rect(0, 0, 10, 30), placeholder="id e.g. qwen"),
@@ -203,6 +212,7 @@ class WatchtowerApp:
                 self.simulation.update(dt, provider_snapshot.telemetry)
                 self._drain_model_results()
                 self._sync_external_tasks()
+                self._sync_external_completions()
                 self._start_ready_model_calls()
                 self._sync_completion_effects()
                 self._update_effects(dt)
@@ -601,6 +611,48 @@ class WatchtowerApp:
         if new_count:
             self.flash_message = f"Pulled {new_count} task(s) from integrations"
 
+    def _task_model_prompt(self, task: SubmittedTask) -> str:
+        """The prompt sent to the model — plus cloned-repo context for GitHub tasks."""
+        link = self.external_links.get(task.id)
+        if not link or link[0] != "github":
+            return task.prompt
+        repo = link[1].partition("#")[0]
+        dest = REPOS_DIR / repo.replace("/", "--")
+        if not dest.exists():
+            return task.prompt
+        return f"{task.prompt}\n\n---\n{repo_context(dest)}"
+
+    def _sync_external_completions(self) -> None:
+        """Push newly completed externally-linked tasks back to their service."""
+        for task_id, (source, external_id) in self.external_links.items():
+            if task_id in self._external_completed_seen:
+                continue
+            task = self.simulation.tasks.get(task_id)
+            if task is None or task.status is not TaskStatus.COMPLETE:
+                continue
+            self._external_completed_seen.add(task_id)
+            self._dispatch_external_result(source, external_id, task.title, task.model_response)
+
+    def _dispatch_external_result(self, source: str, external_id: str, title: str, response: str | None) -> None:
+        threading.Thread(
+            target=self._push_external_result,
+            args=(source, external_id, title, response),
+            name=f"integration-push-{external_id}",
+            daemon=True,
+        ).start()
+
+    def _push_external_result(self, source: str, external_id: str, title: str, response: str | None) -> None:
+        comment = completion_comment(title, response)
+        try:
+            if source == "todoist":
+                self.todoist.complete_task(external_id, comment)
+                self._integration_messages.put(f"Todoist task {external_id} closed")
+            elif source == "github":
+                self.github.comment_issue(external_id, comment)
+                self._integration_messages.put(f"Commented on {external_id}")
+        except Exception as exc:
+            self._integration_messages.put(f"Push to {source} failed: {exc}"[:120])
+
     def _handle_agent_command(self, arg: str) -> None:
         if arg.startswith("remove "):
             agent_id = arg.removeprefix("remove ").strip().lower()
@@ -717,7 +769,7 @@ class WatchtowerApp:
             self._dispatch_token[task.id] = token
             thread = threading.Thread(
                 target=self._run_model_task,
-                args=(task.id, agent.profile, task.prompt, token),
+                args=(task.id, agent.profile, self._task_model_prompt(task), token),
                 name=f"watchtower-model-{task.id}",
                 daemon=True,
             )

@@ -173,3 +173,50 @@ def test_ui_inbound_sync_and_commands(monkeypatch) -> None:
         app.poller.stop()
         app.integration_poller.stop()
         pygame.quit()
+
+
+def test_ui_outbound_completion_and_repo_context(monkeypatch, tmp_path: Path) -> None:
+    import os
+
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+    os.environ["WATCHTOWER_NO_AUTOSAVE"] = "1"
+    import pygame
+
+    from watchtower.ui import WatchtowerApp
+
+    app = WatchtowerApp(web_mode=True)
+    try:
+        task = app.simulation.submit_task("fix crash", requested_agent_id="gpt")
+        app.external_links[task.id] = ("github", "acme/tool#5")
+
+        dispatched: list[tuple] = []
+        monkeypatch.setattr(app, "_dispatch_external_result", lambda *args: dispatched.append(args))
+        app._sync_external_completions()
+        assert dispatched == []  # not complete yet
+        task.assign_to("gpt")
+        task.mark_progress(1.0)
+        app._sync_external_completions()
+        app._sync_external_completions()  # second pass must not re-push
+        assert len(dispatched) == 1
+        assert dispatched[0][:2] == ("github", "acme/tool#5")
+
+        recorded: dict[str, tuple] = {}
+        monkeypatch.setattr(app.todoist, "complete_task", lambda eid, c: recorded.setdefault("todoist", (eid, c)))
+        monkeypatch.setattr(app.github, "comment_issue", lambda eid, b: recorded.setdefault("github", (eid, b)))
+        app._push_external_result("todoist", "42", "title", "resp")
+        app._push_external_result("github", "acme/tool#5", "title", None)
+        assert recorded["todoist"][0] == "42" and "resp" in recorded["todoist"][1]
+        assert recorded["github"][0] == "acme/tool#5"
+        assert not app._integration_messages.empty()
+
+        clone = tmp_path / "acme--tool"
+        clone.mkdir()
+        (clone / "main.py").write_text("x = 1")
+        monkeypatch.setattr("watchtower.ui.REPOS_DIR", tmp_path)
+        assert "main.py" in app._task_model_prompt(task)
+        plain = app.simulation.submit_task("no link")
+        assert app._task_model_prompt(plain) == plain.prompt
+    finally:
+        app.poller.stop()
+        app.integration_poller.stop()
+        pygame.quit()
