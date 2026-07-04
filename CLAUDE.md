@@ -148,7 +148,13 @@ waits if it's busy); otherwise the least-loaded free agent wins.
 - `/cancel <id>`, `/retry <id>`, `/clear` — task lifecycle controls (also via the
   detail overlay buttons).
 - `/save [path]`, `/load [path]`, `/export <id> [path]` — persistence (`persistence.py`).
-- `/key <provider> <value>` — set a model API key/base URL at runtime.
+- `/key <provider> <value>` — set a model API key/base URL at runtime (also
+  `todoist`/`github` integration tokens).
+- `/todoist <project>` — pull open Todoist tasks from that project as todo cards;
+  completing one closes it in Todoist with the result as a comment.
+- `/github repo add|remove <owner/name>`, `/github clone <owner/name>` — pull open
+  issues as todo cards (results post back as issue comments); cloned repos add
+  file-tree/README context to that repo's task prompts (`integrations.py`).
 - `/agent add <id> <provider> <model> [Name]`, `/agent remove <id>` — edit the roster
   (also calls `poller.set_profiles`).
 - `/endpoint <url>`, `/auth token <tok>`, `/auth login <user> <pass>` — reconfigure

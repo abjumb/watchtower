@@ -13,6 +13,15 @@ import pygame
 
 from watchtower.auth import AuthConfig
 from watchtower.data_provider import AgentDataProvider, TelemetryPoller
+from watchtower.integrations import (
+    REPOS_DIR,
+    GitHubClient,
+    IntegrationConfig,
+    IntegrationPoller,
+    TodoistClient,
+    completion_comment,
+    repo_context,
+)
 from watchtower.model_api import ModelApiClient, ModelCallResult
 from watchtower.models import (
     AgentProfile,
@@ -122,6 +131,15 @@ class WatchtowerApp:
         self.running_model_tasks: set[str] = set()
         self._dispatch_token: dict[str, int] = {}
         self._dispatch_seq = 0
+        self.integration_config = IntegrationConfig.from_env()
+        self.todoist = TodoistClient(self.integration_config)
+        self.github = GitHubClient(self.integration_config)
+        self.integration_poller = IntegrationPoller(self.todoist, self.github)
+        self.external_seen: set[str] = set()
+        self.external_links: dict[str, tuple[str, str]] = {}
+        self._integration_messages: queue.Queue[str] = queue.Queue()
+        self._integration_error: str | None = None
+        self._external_completed_seen: set[str] = set()
         self.text_input = TextInput(pygame.Rect(16, 0, 200, 52), focused=True)
         self.add_agent_inputs = {
             "id": TextInput(pygame.Rect(0, 0, 10, 30), placeholder="id e.g. qwen"),
@@ -185,6 +203,7 @@ class WatchtowerApp:
     # ----- main loop ---------------------------------------------------------
     def run(self) -> None:
         self.poller.start()
+        self.integration_poller.start()
         try:
             while self.running:
                 dt = self.clock.tick(60) / 1000
@@ -192,6 +211,8 @@ class WatchtowerApp:
                 provider_snapshot = self.poller.latest()
                 self.simulation.update(dt, provider_snapshot.telemetry)
                 self._drain_model_results()
+                self._sync_external_tasks()
+                self._sync_external_completions()
                 self._start_ready_model_calls()
                 self._sync_completion_effects()
                 self._update_effects(dt)
@@ -203,6 +224,7 @@ class WatchtowerApp:
             if self.autosave_enabled:
                 self._autosave()
             self.poller.stop()
+            self.integration_poller.stop()
 
     async def run_async(self) -> None:
         """Browser/pygbag entry point.
@@ -464,6 +486,14 @@ class WatchtowerApp:
             tasks = self.simulation.submit_comparison(text.removeprefix("/compare ").strip())
             self.flash_message = f"Comparing across {len(tasks)} agents"
             return True
+        if text.startswith("/todoist "):
+            self.integration_config.todoist_project = text.removeprefix("/todoist ").strip()
+            self.integration_poller.poke()
+            self.flash_message = f"Todoist project: {self.integration_config.todoist_project or 'all'}"
+            return True
+        if text.startswith("/github "):
+            self._handle_github_command(text.removeprefix("/github ").strip())
+            return True
         if text.startswith("/key "):
             self._handle_key_command(text.removeprefix("/key ").strip())
             return True
@@ -523,11 +553,105 @@ class WatchtowerApp:
             self.flash_message = "Use /key PROVIDER VALUE"
             return
         provider, value = parts
+        if provider.lower() in ("todoist", "github"):
+            self.integration_config.set_key(provider.lower(), value)
+            self.integration_poller.poke()
+            self.flash_message = f"{provider.lower()} token set"
+            return
         try:
             self.model_api.config.set_key(provider.lower(), value)
             self.flash_message = f"{provider.lower()} key set"
         except ValueError:
             self.flash_message = f"Unknown provider: {provider}"
+
+    def _handle_github_command(self, arg: str) -> None:
+        parts = arg.split()
+        if len(parts) == 3 and parts[0] == "repo" and parts[1] in ("add", "remove"):
+            repo = parts[2]
+            repos = self.integration_config.github_repos
+            if parts[1] == "add" and repo not in repos:
+                repos.append(repo)
+            elif parts[1] == "remove" and repo in repos:
+                repos.remove(repo)
+            self.integration_poller.poke()
+            self.flash_message = f"GitHub repos: {', '.join(repos) or 'none'}"
+            return
+        if len(parts) == 2 and parts[0] == "clone":
+            repo = parts[1]
+
+            def worker() -> None:
+                try:
+                    dest = self.github.clone_repo(repo)
+                    self._integration_messages.put(f"Cloned {repo} -> {dest.name}")
+                except Exception as exc:
+                    self._integration_messages.put(f"Clone failed: {exc}"[:120])
+
+            threading.Thread(target=worker, name="github-clone", daemon=True).start()
+            self.flash_message = f"Cloning {repo}..."
+            return
+        self.flash_message = "Use /github repo add|remove OWNER/NAME or /github clone OWNER/NAME"
+
+    def _sync_external_tasks(self) -> None:
+        """Turn newly seen external tasks into todo cards (main thread only)."""
+        while not self._integration_messages.empty():
+            self.flash_message = self._integration_messages.get_nowait()
+        tasks, error = self.integration_poller.latest()
+        if error != self._integration_error:
+            self._integration_error = error
+            if error:
+                self.flash_message = error
+        new_count = 0
+        for external in tasks:
+            if external.external_id in self.external_seen:
+                continue
+            task = self.simulation.create_todo_task(external.prompt)
+            self.external_links[task.id] = (external.source, external.external_id)
+            self.external_seen.add(external.external_id)
+            new_count += 1
+        if new_count:
+            self.flash_message = f"Pulled {new_count} task(s) from integrations"
+
+    def _task_model_prompt(self, task: SubmittedTask) -> str:
+        """The prompt sent to the model — plus cloned-repo context for GitHub tasks."""
+        link = self.external_links.get(task.id)
+        if not link or link[0] != "github":
+            return task.prompt
+        repo = link[1].partition("#")[0]
+        dest = REPOS_DIR / repo.replace("/", "--")
+        if not dest.exists():
+            return task.prompt
+        return f"{task.prompt}\n\n---\n{repo_context(dest)}"
+
+    def _sync_external_completions(self) -> None:
+        """Push newly completed externally-linked tasks back to their service."""
+        for task_id, (source, external_id) in self.external_links.items():
+            if task_id in self._external_completed_seen:
+                continue
+            task = self.simulation.tasks.get(task_id)
+            if task is None or task.status is not TaskStatus.COMPLETE:
+                continue
+            self._external_completed_seen.add(task_id)
+            self._dispatch_external_result(source, external_id, task.title, task.model_response)
+
+    def _dispatch_external_result(self, source: str, external_id: str, title: str, response: str | None) -> None:
+        threading.Thread(
+            target=self._push_external_result,
+            args=(source, external_id, title, response),
+            name=f"integration-push-{external_id}",
+            daemon=True,
+        ).start()
+
+    def _push_external_result(self, source: str, external_id: str, title: str, response: str | None) -> None:
+        comment = completion_comment(title, response)
+        try:
+            if source == "todoist":
+                self.todoist.complete_task(external_id, comment)
+                self._integration_messages.put(f"Todoist task {external_id} closed")
+            elif source == "github":
+                self.github.comment_issue(external_id, comment)
+                self._integration_messages.put(f"Commented on {external_id}")
+        except Exception as exc:
+            self._integration_messages.put(f"Push to {source} failed: {exc}"[:120])
 
     def _handle_agent_command(self, arg: str) -> None:
         if arg.startswith("remove "):
@@ -645,7 +769,7 @@ class WatchtowerApp:
             self._dispatch_token[task.id] = token
             thread = threading.Thread(
                 target=self._run_model_task,
-                args=(task.id, agent.profile, task.prompt, token),
+                args=(task.id, agent.profile, self._task_model_prompt(task), token),
                 name=f"watchtower-model-{task.id}",
                 daemon=True,
             )
