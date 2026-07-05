@@ -169,6 +169,9 @@ class WatchtowerApp:
         self._bg_surface: pygame.Surface | None = None
         self._bg_cache_key: tuple[int, int, str] | None = None
         self._cheer_until: dict[str, float] = {}
+        self._render_pos: dict[str, list[float]] = {}
+        self._render_time = 0.0
+        self._mouse: tuple[int, int] = (0, 0)
         self._toolbar_cache: list[Button] | None = None
         self._toolbar_cache_key: tuple[int, int] | None = None
         self.running = True
@@ -725,7 +728,12 @@ class WatchtowerApp:
         """Where a completion effect spawns, and the accent color it bursts in."""
         agent = self.simulation.agents.get(task.assigned_agent_id or task.requested_agent_id or "")
         if agent:
-            color = _hex_to_rgb(agent.profile.accent_color, self.theme.accent)
+            mode = MODES["night"] if self.theme.name == "dark" else MODES["paper"]
+            color = mode["tints"].get(agent.profile.id, _hex_to_rgb(agent.profile.accent_color, self.theme.accent))
+            pos = self._render_pos.get(agent.profile.id)
+            if pos is not None:
+                # Spawn on the eased (drawn) villager, not the raw sim position.
+                return (int(round(pos[0])), int(round(pos[1]))), color
             return self._agent_screen_position(agent), color
         return (WORLD_X + WORLD_WIDTH // 2, WORLD_Y + WORLD_HEIGHT // 2), self.theme.success
 
@@ -742,7 +750,9 @@ class WatchtowerApp:
         if self.inspect_agent_id and self.inspect_agent_id not in self.simulation.agents:
             self.inspect_agent_id = None
         self._draw_app_background()
+        self._mouse = pygame.mouse.get_pos()
         snapshot = self.simulation.snapshot()
+        self._smooth_agent_positions(snapshot)
         self._draw_todo_panel(snapshot.tasks)
         self._draw_world()
         for agent in snapshot.agents:
@@ -1013,14 +1023,46 @@ class WatchtowerApp:
         # (_draw_static_chrome); only the live flash message is drawn here.
         self._text(self.flash_message, WORLD_X + 20, 60, self.small_font, self.theme.muted)
 
+    def _smooth_agent_positions(self, snapshot) -> None:
+        """Ease rendered agent positions toward their sim positions.
+
+        Purely render-side: the simulation stays authoritative for hit-testing
+        and routing. dt derives from the sim clock so every frame recipe
+        (run, run_async, benchmarks) gets identical easing, and a redraw with
+        no sim update leaves positions untouched.
+        """
+        frame_dt = max(0.0, snapshot.elapsed_seconds - self._render_time)
+        self._render_time = snapshot.elapsed_seconds
+        blend = min(1.0, frame_dt * 8)
+        alive = set()
+        for agent in snapshot.agents:
+            alive.add(agent.profile.id)
+            target = self._agent_screen_position(agent)
+            pos = self._render_pos.get(agent.profile.id)
+            if pos is None:
+                self._render_pos[agent.profile.id] = [float(target[0]), float(target[1])]
+                continue
+            pos[0] += (target[0] - pos[0]) * blend
+            pos[1] += (target[1] - pos[1]) * blend
+        for agent_id in list(self._render_pos):
+            if agent_id not in alive:
+                del self._render_pos[agent_id]
+
     def _draw_agent(self, agent: AgentState) -> None:
         theme = self.theme
-        x, y = self._agent_screen_position(agent)
+        pos = self._render_pos.get(agent.profile.id)
+        if pos is None:
+            x, y = self._agent_screen_position(agent)
+        else:
+            x, y = int(round(pos[0])), int(round(pos[1]))
         mode = MODES["night"] if theme.name == "dark" else MODES["paper"]
         color = mode["tints"].get(agent.profile.id, _hex_to_rgb(agent.profile.accent_color, theme.accent))
         bob = 0
         if agent.status is AgentStatus.WORKING:
             bob = int(round(2.5 * math.sin(self.simulation.elapsed_seconds * 6 + x)))
+        elif agent.status is AgentStatus.IDLE:
+            # Idle breathing, sprite-style: a slow one-pixel bob.
+            bob = int(round(1.0 * math.sin(self.simulation.elapsed_seconds * 2.2 + x * 0.05)))
         cy = y + bob
         pose = "idle"
         if agent.status is AgentStatus.OFFLINE:
@@ -1036,9 +1078,12 @@ class WatchtowerApp:
         key = agent.profile.id if agent.profile.id in SPRITES else "gpt"
         sprite = sprite_surface(key, pose=pose, tint=color, ink=mode["ink"], screen=_blend(theme.surface_alt, theme.bg, 0.30), scale=4)
         sprite_w, sprite_h = sprite.get_size()
+        hovered = (self._mouse[0] - x) ** 2 + (self._mouse[1] - cy) ** 2 <= 31 * 31
+        frame = pygame.Rect(x - sprite_w // 2 - 6, cy - sprite_h // 2 - 6, sprite_w + 12, sprite_h + 12)
         if agent.profile.id == self.selected_agent_id:
-            frame = pygame.Rect(x - sprite_w // 2 - 6, cy - sprite_h // 2 - 6, sprite_w + 12, sprite_h + 12)
             pygame.draw.rect(self.screen, _blend(theme.text, color, 0.18), frame, width=2, border_radius=8)
+        elif hovered:
+            pygame.draw.rect(self.screen, _blend(theme.grid, theme.text, 0.16), frame, width=1, border_radius=8)
         self.screen.blit(sprite, (x - sprite_w // 2, cy - sprite_h // 2))
         name = _render_text(self.small_font, agent.profile.display_name, theme.text)
         self.screen.blit(name, name.get_rect(center=(x, cy + 38)))
@@ -1054,7 +1099,12 @@ class WatchtowerApp:
         active = [task for task in tasks if task.status in {TaskStatus.ASSIGNED, TaskStatus.IN_PROGRESS}]
         for index, task in enumerate(active[:5]):
             rect = pygame.Rect(WORLD_X + 84 + index * 145, WORLD_Y + WORLD_HEIGHT - 40, 106, 30)
-            self._draw_liquid_rect(rect, fill=_blend(theme.surface_alt, theme.bg, 0.05), border=_priority_color(task.priority, theme), radius=8, shadow=False)
+            fill = _blend(theme.surface_alt, theme.bg, 0.05)
+            border = _priority_color(task.priority, theme)
+            if rect.collidepoint(self._mouse):
+                fill = _blend(fill, theme.text, 0.10)
+                border = _blend(border, theme.text, 0.16)
+            self._draw_liquid_rect(rect, fill=fill, border=border, radius=8, shadow=False)
             pygame.draw.rect(self.screen, theme.accent, (rect.x, rect.y, int(rect.width * task.progress), 4), border_radius=2)
             label = _render_text(self.small_font, task.id, theme.text)
             self.screen.blit(label, label.get_rect(center=rect.center))
@@ -1089,6 +1139,8 @@ class WatchtowerApp:
             row = self._agent_row_rect(index)
             if agent.profile.id == self.selected_agent_id:
                 self._draw_liquid_rect(row, fill=_blend(theme.surface_alt, color, 0.08), border=color, radius=8, shadow=False)
+            elif row.collidepoint(self._mouse):
+                self._draw_liquid_rect(row, fill=_blend(theme.surface_alt, theme.text, 0.10), border=_blend(theme.grid, theme.text, 0.16), radius=8, shadow=False)
             pygame.draw.circle(self.screen, color, (PANEL_X + 28, y + 9), 7)
             self._text(agent.profile.model_name[:20], PANEL_X + 44, y, self.font, theme.text)
             connection = "live key" if self.model_api.is_configured(agent.profile) else agent.profile.provider
@@ -1131,7 +1183,12 @@ class WatchtowerApp:
             color = theme.success if task.status is TaskStatus.COMPLETE else _priority_color(task.priority, theme)
             if task.status is TaskStatus.FAILED:
                 color = theme.danger
-            self._draw_liquid_rect(rect, fill=_blend(theme.surface_alt, theme.bg, 0.08), border=theme.grid, radius=8, shadow=False)
+            row_fill = _blend(theme.surface_alt, theme.bg, 0.08)
+            row_border = theme.grid
+            if rect.collidepoint(self._mouse):
+                row_fill = _blend(row_fill, theme.text, 0.10)
+                row_border = _blend(row_border, theme.text, 0.16)
+            self._draw_liquid_rect(rect, fill=row_fill, border=row_border, radius=8, shadow=False)
             if absolute_index == self.task_cursor:
                 pygame.draw.rect(self.screen, _blend(theme.text, color, 0.20), rect, width=1, border_radius=8)
             pygame.draw.rect(self.screen, color, (rect.x, rect.y, 4, 50), border_radius=2)
@@ -1645,7 +1702,12 @@ class WatchtowerApp:
     def _draw_todo_card(self, task: SubmittedTask, rect: pygame.Rect, ghost: bool = False) -> None:
         theme = self.theme
         fill = theme.surface_alt if not ghost else _blend(theme.surface_alt, theme.accent, 0.35)
-        self._draw_liquid_rect(rect, fill=_blend(fill, theme.bg, 0.08), border=_priority_color(task.priority, theme), radius=10, shadow=not ghost)
+        card_fill = _blend(fill, theme.bg, 0.08)
+        border = _priority_color(task.priority, theme)
+        if not ghost and rect.collidepoint(self._mouse):
+            card_fill = _blend(card_fill, theme.text, 0.10)
+            border = _blend(border, theme.text, 0.16)
+        self._draw_liquid_rect(rect, fill=card_fill, border=border, radius=10, shadow=not ghost)
         self._text(task.title[:24], rect.x + 10, rect.y + 8, self.small_font, theme.text)
         self._text("grab and drop", rect.x + 10, rect.y + 27, self.small_font, theme.muted)
 
