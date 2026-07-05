@@ -89,12 +89,12 @@ def test_renders_a_frame_in_both_themes_with_overlays() -> None:
         app.simulation.submit_task("render me", requested_agent_id="gpt")
         _render_frame(app)
         app._toggle_theme()
-        assert app.theme is LIGHT_THEME
+        assert app.theme is DARK_THEME  # paper (light) is the default now
         app.show_help = True
         app.selected_task_id = next(iter(app.simulation.tasks))
-        _render_frame(app)  # detail + help overlays in light theme
+        _render_frame(app)  # detail + help overlays in dark theme
         app._toggle_theme()
-        assert app.theme is DARK_THEME
+        assert app.theme is LIGHT_THEME
 
 
 def test_compare_input_fans_out_to_every_agent() -> None:
@@ -342,8 +342,8 @@ def test_settings_toggle_switches_theme() -> None:
         app._open_settings()
         _render_frame(app)
         toggles, _ = app._settings_widgets()
-        app._settings_click(toggles[0].rect.center)  # "Light theme"
-        assert app.theme is LIGHT_THEME
+        app._settings_click(toggles[0].rect.center)  # "Light theme" off -> dark
+        assert app.theme is DARK_THEME
 
 
 def test_clicking_outside_settings_closes_it() -> None:

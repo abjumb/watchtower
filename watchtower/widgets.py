@@ -64,8 +64,9 @@ def _render_label(font, text: str, color: tuple[int, int, int]) -> pygame.Surfac
 
 def _liquid_rect(screen, rect: pygame.Rect, fill, border, radius: int = 8, shadow: bool = True) -> None:
     if shadow:
-        shadow_surface = rounded_alpha_surface((rect.width + 12, rect.height + 12), (6, 7, rect.width, rect.height), radius, (0, 0, 0, 80))
-        screen.blit(shadow_surface, (rect.x - 6, rect.y - 5))
+        # Offset "stamp" shadow to match the paper-board design language.
+        shadow_surface = rounded_alpha_surface((rect.width, rect.height), (0, 0, rect.width, rect.height), radius, (0, 0, 0, 55))
+        screen.blit(shadow_surface, (rect.x + 2, rect.y + 2))
     pygame.draw.rect(screen, fill, rect, border_radius=radius)
     highlight = _mix(fill, (255, 255, 255), 0.12)
     pygame.draw.line(screen, highlight, (rect.x + radius, rect.y + 1), (rect.right - radius, rect.y + 1), 1)

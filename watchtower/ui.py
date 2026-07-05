@@ -24,6 +24,7 @@ from watchtower.models import (
 )
 from watchtower.persistence import export_task_text, load_session, save_session
 from watchtower.simulation import WORLD_HEIGHT, WORLD_WIDTH, SimulationState
+from watchtower.sprites import MODES, SPRITES, sprite_surface
 from watchtower.widgets import Button, Dropdown, TextInput, Toggle, rounded_alpha_surface
 
 
@@ -67,33 +68,35 @@ class Theme:
 
 
 DARK_THEME = Theme(
+    # "Night" ink map from the design refresh (Fieldnotes x Overworld merge).
     name="dark",
-    bg=(4, 5, 7),
-    surface=(13, 14, 18),
-    surface_alt=(29, 31, 38),
-    text=(239, 241, 246),
-    muted=(145, 149, 161),
-    grid=(54, 57, 66),
-    accent=(141, 164, 255),
-    success=(92, 229, 170),
-    danger=(255, 116, 132),
-    warning=(245, 200, 95),
-    overlay=(3, 4, 6),
+    bg=(18, 18, 31),
+    surface=(22, 22, 42),
+    surface_alt=(35, 36, 65),
+    text=(236, 235, 247),
+    muted=(141, 143, 174),
+    grid=(52, 54, 90),
+    accent=(232, 130, 90),
+    success=(93, 211, 158),
+    danger=(255, 132, 150),
+    warning=(238, 195, 94),
+    overlay=(13, 12, 28),
 )
 
 LIGHT_THEME = Theme(
+    # "Paper" board — the refresh's default: ink lines on warm paper.
     name="light",
-    bg=(230, 232, 236),
-    surface=(247, 248, 251),
-    surface_alt=(221, 224, 231),
-    text=(20, 22, 27),
-    muted=(99, 105, 117),
-    grid=(193, 199, 209),
-    accent=(75, 101, 225),
-    success=(35, 152, 103),
-    danger=(202, 67, 84),
-    warning=(173, 124, 28),
-    overlay=(204, 208, 216),
+    bg=(242, 239, 231),
+    surface=(251, 250, 245),
+    surface_alt=(236, 232, 221),
+    text=(42, 38, 32),
+    muted=(120, 113, 95),
+    grid=(150, 143, 126),
+    accent=(207, 111, 62),
+    success=(62, 156, 112),
+    danger=(207, 62, 85),
+    warning=(200, 152, 42),
+    overlay=(226, 221, 209),
 )
 
 PRIORITY_NAMES = {p.value: p for p in TaskPriority}
@@ -108,11 +111,12 @@ class WatchtowerApp:
         self.screen_height = SCREEN_HEIGHT
         self.screen = pygame.display.set_mode((self.screen_width, self.screen_height), pygame.RESIZABLE)
         self.clock = pygame.time.Clock()
+        # Refresh type ramp: serif display headers + mono telemetry chrome.
         self.font = pygame.font.SysFont("helvetica neue,arial", 16)
-        self.small_font = pygame.font.SysFont("helvetica neue,arial", 13)
-        self.title_font = pygame.font.SysFont("helvetica neue,arial", 24, bold=True)
-        self.badge_font = pygame.font.SysFont("helvetica neue,arial", 14, bold=True)
-        self.theme = DARK_THEME
+        self.small_font = pygame.font.SysFont("menlo,monaco,courier new", 12)
+        self.title_font = pygame.font.SysFont("georgia,times new roman", 24)
+        self.badge_font = pygame.font.SysFont("menlo,monaco,courier new", 12, bold=True)
+        self.theme = LIGHT_THEME  # paper board is the refresh's default
         self.simulation = SimulationState()
         self.auth_config = AuthConfig.from_env()
         self.provider = AgentDataProvider(self.auth_config)
@@ -164,6 +168,7 @@ class WatchtowerApp:
         self._panel_task_hits: list[tuple[pygame.Rect, str]] = []
         self._bg_surface: pygame.Surface | None = None
         self._bg_cache_key: tuple[int, int, str] | None = None
+        self._cheer_until: dict[str, float] = {}
         self._toolbar_cache: list[Button] | None = None
         self._toolbar_cache_key: tuple[int, int] | None = None
         self.running = True
@@ -710,6 +715,10 @@ class WatchtowerApp:
                 self._completed_seen.add(task.id)
                 center, color = self._effect_origin(task)
                 self.effects.append([float(center[0]), float(center[1]), 0.0, 0.9, color])
+                agent_id = task.assigned_agent_id or task.requested_agent_id
+                if agent_id:
+                    # The villager celebrates while the burst plays.
+                    self._cheer_until[agent_id] = self.simulation.elapsed_seconds + 1.2
         self._completed_seen &= set(self.simulation.tasks)
 
     def _effect_origin(self, task: SubmittedTask) -> tuple[tuple[int, int], tuple[int, int, int]]:
@@ -1007,18 +1016,30 @@ class WatchtowerApp:
     def _draw_agent(self, agent: AgentState) -> None:
         theme = self.theme
         x, y = self._agent_screen_position(agent)
-        color = _hex_to_rgb(agent.profile.accent_color, theme.accent)
+        mode = MODES["night"] if theme.name == "dark" else MODES["paper"]
+        color = mode["tints"].get(agent.profile.id, _hex_to_rgb(agent.profile.accent_color, theme.accent))
         bob = 0
         if agent.status is AgentStatus.WORKING:
             bob = int(round(2.5 * math.sin(self.simulation.elapsed_seconds * 6 + x)))
         cy = y + bob
-        self.screen.blit(_agent_glow_surface(color), (x - 46, cy - 46))
-        pygame.draw.circle(self.screen, _blend(color, theme.bg, 0.55), (x, cy), 31)
+        pose = "idle"
+        if agent.status is AgentStatus.OFFLINE:
+            pose = "sleep"
+        elif self.simulation.elapsed_seconds < self._cheer_until.get(agent.profile.id, 0.0):
+            pose = "cheer"
+        elif agent.status is AgentStatus.WORKING:
+            pose = "work"
+        elif "patrol" in agent.action.value or "moving" in agent.action.value:
+            # Two-frame gait while on the move, offset per-agent so the
+            # villagers don't march in lockstep.
+            pose = "walk" if int(self.simulation.elapsed_seconds * 4 + x) % 2 else "idle"
+        key = agent.profile.id if agent.profile.id in SPRITES else "gpt"
+        sprite = sprite_surface(key, pose=pose, tint=color, ink=mode["ink"], screen=_blend(theme.surface_alt, theme.bg, 0.30), scale=4)
+        sprite_w, sprite_h = sprite.get_size()
         if agent.profile.id == self.selected_agent_id:
-            pygame.draw.circle(self.screen, _blend(theme.text, color, 0.18), (x, cy), 35, width=2)
-        pygame.draw.circle(self.screen, color, (x, cy), 24)
-        pygame.draw.circle(self.screen, _blend(theme.bg, theme.surface, 0.30), (x, cy), 17)
-        self._draw_face(x, cy, agent.status, color)
+            frame = pygame.Rect(x - sprite_w // 2 - 6, cy - sprite_h // 2 - 6, sprite_w + 12, sprite_h + 12)
+            pygame.draw.rect(self.screen, _blend(theme.text, color, 0.18), frame, width=2, border_radius=8)
+        self.screen.blit(sprite, (x - sprite_w // 2, cy - sprite_h // 2))
         name = _render_text(self.small_font, agent.profile.display_name, theme.text)
         self.screen.blit(name, name.get_rect(center=(x, cy + 38)))
         action = _render_text(self.small_font, agent.action.value.replace("_", " "), theme.muted)
@@ -1026,24 +1047,6 @@ class WatchtowerApp:
         load_width = 42
         pygame.draw.rect(self.screen, _blend(theme.surface_alt, theme.bg, 0.18), (x - 21, cy - 38, load_width, 5), border_radius=3)
         pygame.draw.rect(self.screen, color, (x - 21, cy - 38, int(load_width * agent.metrics.load), 5), border_radius=3)
-
-    def _draw_face(self, cx: int, cy: int, status: AgentStatus, color: tuple[int, int, int]) -> None:
-        feature = self.theme.muted if status is AgentStatus.OFFLINE else self.theme.text
-        blink = (self.simulation.elapsed_seconds + cx * 0.13) % 3.4 < 0.12
-        if status is AgentStatus.OFFLINE or blink:
-            pygame.draw.line(self.screen, feature, (cx - 8, cy - 3), (cx - 4, cy - 3), 2)
-            pygame.draw.line(self.screen, feature, (cx + 4, cy - 3), (cx + 8, cy - 3), 2)
-        else:
-            pygame.draw.circle(self.screen, feature, (cx - 6, cy - 3), 2)
-            pygame.draw.circle(self.screen, feature, (cx + 6, cy - 3), 2)
-        if status is AgentStatus.WORKING:
-            pygame.draw.circle(self.screen, feature, (cx, cy + 6), 2, width=1)
-        elif status is AgentStatus.IDLE:
-            pygame.draw.lines(self.screen, feature, False, [(cx - 5, cy + 4), (cx, cy + 7), (cx + 5, cy + 4)], 2)
-        elif status is AgentStatus.DEGRADED:
-            pygame.draw.lines(self.screen, self.theme.danger, False, [(cx - 5, cy + 7), (cx, cy + 4), (cx + 5, cy + 7)], 2)
-        else:
-            pygame.draw.line(self.screen, feature, (cx - 5, cy + 6), (cx + 5, cy + 6), 2)
 
     def _draw_task_stations(self, tasks: list[SubmittedTask]) -> None:
         theme = self.theme
@@ -1291,6 +1294,25 @@ class WatchtowerApp:
         pygame.draw.circle(surface, _blend(theme.surface_alt, theme.accent, 0.18), (WORLD_X + WORLD_WIDTH // 2, WORLD_Y + WORLD_HEIGHT // 2), 190, width=1)
         pygame.draw.circle(surface, _blend(theme.surface_alt, theme.bg, 0.22), (WORLD_X + WORLD_WIDTH // 2, WORLD_Y + WORLD_HEIGHT // 2), 310, width=1)
         self._text("Watchtower", WORLD_X + 18, 30, self.title_font, theme.text, surface=surface)
+        # Office furniture from the refresh's sprite set: a desk per station
+        # slot plus a few props, baked with the chrome (size+theme keyed).
+        mode = MODES["night"] if theme.name == "dark" else MODES["paper"]
+        wood = (166, 108, 64)
+        screen_glow = _blend(theme.surface_alt, theme.accent, 0.25)
+        desk = sprite_surface("desk", tint=wood, ink=mode["ink"], screen=screen_glow, scale=3)
+        for index in range(5):
+            desk_x = WORLD_X + 84 + index * 145 + 53 - desk.get_width() // 2
+            surface.blit(desk, (desk_x, WORLD_Y + WORLD_HEIGHT - 48 - desk.get_height()))
+        props = (
+            ("plant", (150, 143, 129), WORLD_X + 22, WORLD_Y + WORLD_HEIGHT - 140),
+            ("shelf", wood, WORLD_X + WORLD_WIDTH - 66, WORLD_Y + 24),
+            ("cooler", (150, 143, 129), WORLD_X + WORLD_WIDTH - 56, WORLD_Y + WORLD_HEIGHT - 160),
+            ("clock", (150, 143, 129), WORLD_X + WORLD_WIDTH // 2 - 13, WORLD_Y + 22),
+            ("cat", (150, 143, 129), WORLD_X + 56, WORLD_Y + 54),
+        )
+        for key, tint, prop_x, prop_y in props:
+            prop = sprite_surface(key, tint=tint, ink=mode["ink"], screen=screen_glow, scale=3)
+            surface.blit(prop, (prop_x, prop_y))
 
     def _draw_liquid_rect(
         self,
@@ -1306,15 +1328,15 @@ class WatchtowerApp:
         fill = fill or self.theme.surface
         border = border or self.theme.grid
         if shadow:
-            shadow_surface = rounded_alpha_surface((rect.width + 18, rect.height + 18), (9, 10, rect.width, rect.height), radius, (0, 0, 0, 110))
-            target.blit(shadow_surface, (rect.x - 9, rect.y - 8))
+            # Offset "stamp" shadow from the paper-board design language.
+            shadow_rgba = (0, 0, 0, 90) if self.theme.name == "dark" else (42, 38, 32, 42)
+            shadow_surface = rounded_alpha_surface((rect.width, rect.height), (0, 0, rect.width, rect.height), radius, shadow_rgba)
+            target.blit(shadow_surface, (rect.x + 3, rect.y + 3))
         if glow:
             glow_surface = rounded_alpha_surface((rect.width + 16, rect.height + 16), (4, 4, rect.width + 8, rect.height + 8), radius + 5, (*glow, 30))
             target.blit(glow_surface, (rect.x - 8, rect.y - 8))
         pygame.draw.rect(target, fill, rect, border_radius=radius)
-        sheen = _blend(fill, self.theme.text, 0.12)
-        pygame.draw.line(target, sheen, (rect.x + radius, rect.y + 1), (rect.right - radius, rect.y + 1), 1)
-        pygame.draw.rect(target, border, rect, width=1, border_radius=radius)
+        pygame.draw.rect(target, border, rect, width=2, border_radius=radius)
 
     def _draw_action_button(self, rect: pygame.Rect, label: str, danger: bool = False) -> None:
         fill = self.theme.danger if danger else self.theme.accent
@@ -1707,27 +1729,6 @@ def _render_text(font: pygame.font.Font, text: str, color: tuple[int, int, int])
             _TEXT_CACHE.clear()
         surface = font.render(text, True, color)
         _TEXT_CACHE[key] = surface
-    return surface
-
-
-_AGENT_GLOW_CACHE: dict[tuple[int, int, int], pygame.Surface] = {}
-_AGENT_GLOW_CACHE_MAX = 32
-
-
-def _agent_glow_surface(color: tuple[int, int, int]) -> pygame.Surface:
-    """Cached per-accent-color agent glow (two alpha circles on 92x92).
-
-    The bitmap depends only on the resolved RGB, so each color rasterizes once
-    instead of once per agent per frame. Treat the result as immutable.
-    """
-    surface = _AGENT_GLOW_CACHE.get(color)
-    if surface is None:
-        if len(_AGENT_GLOW_CACHE) >= _AGENT_GLOW_CACHE_MAX:
-            _AGENT_GLOW_CACHE.clear()
-        surface = pygame.Surface((92, 92), pygame.SRCALPHA)
-        pygame.draw.circle(surface, (*color, 42), (46, 46), 38)
-        pygame.draw.circle(surface, (*color, 18), (46, 46), 45)
-        _AGENT_GLOW_CACHE[color] = surface
     return surface
 
 
